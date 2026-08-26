@@ -1,0 +1,37 @@
+node_modules/
+
+# Build output
+dist/
+dist-core/
+
+# Playwright: browser binaries live outside the repo, but its run artifacts
+# land here when a check fails.
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+.DS_Store
+
+# Vite loads these automatically. Nothing reads env vars today, but a stray
+# `.env` should never be a commit away from the history.
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Vitest --coverage, and tsc's incremental cache if `incremental` is ever set.
+coverage/
+*.tsbuildinfo
+
+# Editors. Local-only settings; the shared .claude/settings.json stays tracked.
+.vscode/
+.idea/
+*.swp
+.claude/settings.local.json
+
+# macOS sidecar files, which appear when the tree is copied or zipped.
+._*

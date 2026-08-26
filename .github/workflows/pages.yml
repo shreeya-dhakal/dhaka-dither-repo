@@ -1,0 +1,65 @@
+# Builds the studio and publishes it to GitHub Pages.
+#
+# `vite.config.ts` sets `base: "./"`, so every asset path is relative and the
+# build works unchanged at `username.github.io/<repo>/` as well as at a domain
+# root. Nothing here needs to know the repository's name.
+#
+# Jekyll is not a concern: `upload-pages-artifact` publishes the directory as-is,
+# and the build emits no underscore-prefixed files anyway — so there is no
+# `.nojekyll` to forget.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  # So a broken build can be redeployed without an empty commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # The fast half of the suite: typecheck plus unit tests. The browser
+      # harness is deliberately not run here — it needs a pinned Chromium
+      # download, and its job is to catch rendering faults before a commit, not
+      # to gate a deploy. Publishing a build whose core logic fails, though, is
+      # worth stopping.
+      - run: npm run test:unit
+
+      # Produces the ordinary `dist/` *and* `dist/dhaka.html`, the single-file
+      # offline copy, so the hosted site also serves a download that works from
+      # the filesystem.
+      - run: npm run build:single
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

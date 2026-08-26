@@ -1,0 +1,14 @@
+{
+  // Hard rule 1, enforced by the compiler rather than by review: no `dom` lib
+  // and no ambient `types`, so `ImageData` or `OffscreenCanvas` in a signature
+  // is a build failure. `npm test` runs this before vitest.
+  //
+  // Tests are excluded because they import vitest, which core itself must not.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": []
+  },
+  "include": ["."],
+  "exclude": ["**/*.test.ts"]
+}

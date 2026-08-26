@@ -1,0 +1,33 @@
+{
+  "name": "dhaka-dither",
+  "version": "1.0.0",
+  "description": "Browser-only dithering, halftone, and text-art studio",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:single": "node scripts/bundle-single.ts",
+    "test": "npm run test:unit && npm run verify",
+    "test:unit": "npm run typecheck:core && vitest run",
+    "verify": "node scripts/verify.ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:core": "tsc -p src/core && node scripts/check-core-imports.ts",
+    "smoke": "node scripts/smoke.ts",
+    "bluenoise": "node scripts/bluenoise.ts",
+    "ranjana:audit": "node scripts/ranjana-audit.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "playwright": "^1.62.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "mp4-muxer": "^5.2.2",
+    "mp4box": "^2.4.1",
+    "webm-muxer": "^5.1.4"
+  }
+}

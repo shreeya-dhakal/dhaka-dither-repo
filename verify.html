@@ -1,0 +1,1957 @@
+<!doctype html>
+<!--
+  Browser characterization checks.
+
+  `npm test` covers pure logic. The properties below cannot live there: they
+  depend on real font loading and real canvas rasterization, and Node has
+  neither. They are the ones a refactor would break silently, so they assert
+  rather than merely display.
+
+  Not part of the build — Vite's only entry is index.html. Run it with the
+  dev server up and read the report:
+
+      npx vite --port 5178 &
+      open http://localhost:5178/verify.html
+
+  or headless, via the verify-in-browser skill. The page title becomes
+  "FAILED" if any check fails, so a screenshot is enough to tell.
+-->
+<meta charset="utf-8" />
+<title>loading</title>
+<body style="margin: 0; font: 13px/1.6 ui-monospace, monospace; background: #fff">
+  <style>
+    @font-face {
+      font-family: "Noto Sans Devanagari";
+      src: url("./fonts/noto-sans-devanagari-var.woff2") format("woff2");
+      font-weight: 400 700;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Nithya Ranjana";
+      src: url("./fonts/nithya-ranjana-du.otf") format("opentype");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("./fonts/ibm-plex-mono-400.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    body {
+      padding: 16px;
+    }
+    .fail {
+      background: #000;
+      color: #fff;
+    }
+  </style>
+  <pre id="report"></pre>
+  <script type="module">
+    import { ensureFontsLoaded, isSupported, measureDensity } from "/src/glyph/density.ts";
+    import { segment } from "/src/glyph/segment.ts";
+    import { StaticParams } from "/src/params.ts";
+    import { FONT_STACK, StillPipeline } from "/src/render/image.ts";
+    import { GpuPipeline, textArtFor } from "/src/render/gpu.ts";
+    import { StaticText } from "/src/text.ts";
+
+    const lines = [];
+    let failed = 0;
+    // Written out as it goes, not at the end: when a check hangs — and the
+    // async ones can — the last line printed is where it stopped.
+    const paint = () => {
+      document.getElementById("report").textContent = lines.join("\n");
+    };
+    const check = (name, got, want) => {
+      const ok = JSON.stringify(got) === JSON.stringify(want);
+      if (!ok) failed++;
+      lines.push(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `\n      got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`}`);
+      paint();
+    };
+    const stage = (name) => {
+      lines.push(`....  ${name}`);
+      paint();
+    };
+
+    await ensureFontsLoaded([`32px ${FONT_STACK.devanagari}`, `32px ${FONT_STACK.mono}`, `32px ${FONT_STACK.ranjana}`]);
+    const deva = FONT_STACK.devanagari;
+    const ABSENT = '"__dhaka_no_such_family__", monospace';
+
+    // --- the property that makes fallback detection work at all ---
+    // Two rasterizations of the same cluster, one centred and one from a fixed
+    // origin, so the harness can show *why* the probe must not centre.
+    const cv = document.createElement("canvas");
+    cv.width = 48;
+    cv.height = 48;
+    const ctx = cv.getContext("2d", { willReadFrequently: true });
+    function alphaDiff(cluster, centred) {
+      const draw = (family) => {
+        ctx.clearRect(0, 0, 48, 48);
+        ctx.font = `32px ${family}`;
+        ctx.fillStyle = "#fff";
+        if (centred) {
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(cluster, 24, 24);
+        } else {
+          ctx.textAlign = "left";
+          ctx.textBaseline = "alphabetic";
+          ctx.fillText(cluster, 4, 38);
+        }
+        return Uint8ClampedArray.from(ctx.getImageData(0, 0, 48, 48).data);
+      };
+      const a = draw(deva);
+      const b = draw(ABSENT);
+      let n = 0;
+      for (let i = 3; i < a.length; i += 4) if (a[i] !== b[i]) n++;
+      return n;
+    }
+
+    /** The same fixed-origin comparison, between any two families. */
+    function alphaDiff2(cluster, familyA, familyB) {
+      const draw = (family) => {
+        ctx.clearRect(0, 0, 48, 48);
+        ctx.font = `32px ${family}`;
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        ctx.fillText(cluster, 4, 38);
+        return Uint8ClampedArray.from(ctx.getImageData(0, 0, 48, 48).data);
+      };
+      const a = draw(familyA);
+      const b = draw(familyB);
+      let n = 0;
+      for (let i = 3; i < a.length; i += 4) if (a[i] !== b[i]) n++;
+      return n;
+    }
+
+    check("fixed-origin probe: uncovered cluster is bit-identical", alphaDiff("🌸", false), 0);
+    check("fixed-origin probe: covered cluster differs", alphaDiff("क्षि", false) > 0, true);
+    // This is the regression guard. Centring offsets the draw by the measured
+    // advance, the advance comes from the font stack, so the same fallback
+    // glyph lands a fraction of a pixel apart and the comparison reports a
+    // false "covered". If this ever reads 0, the probe has been re-centred.
+    check("centred probe would give a false positive", alphaDiff("🌸", true) > 0, true);
+    // Guard for the second half of the same lesson: probing one generic only.
+    check("one generic is not enough — U+2588 differs from the monospace probe",
+      alphaDiff("█", false) > 0, true);
+
+    // --- the consequences callers rely on ---
+    check("Devanagari conjunct is covered", isSupported("क्षि", deva), true);
+    check("Latin is covered", isSupported("A", deva), true);
+    check("Devanagari danda is covered", isSupported("।", deva), true);
+    check("emoji is not covered", isSupported("🌸", deva), false);
+    check("box drawing is not covered", isSupported("█", deva), false);
+    check("Han is not covered", isSupported("漢", deva), false);
+    // Both of these match only the sans-serif probe. A single monospace probe
+    // reports them covered, which is how this was found.
+    check("snowman is not covered", isSupported("☃", deva), false);
+    check("whitespace counts as covered", isSupported(" ", deva), true);
+
+    // --- density still centres, and still orders correctly ---
+    check(
+      "density ordering survives",
+      measureDensity("क", deva) > measureDensity(".", deva) &&
+        measureDensity(".", deva) > measureDensity(" ", deva),
+      true,
+    );
+    check("space measures as no ink", measureDensity(" ", deva), 0);
+
+    // --- ICU parity with the Node test suite ---
+    check("Chrome segments क्षितिज as Node does", segment("क्षितिज"), ["क्षि", "ति", "ज"]);
+    check("Chrome segments नेपाली as Node does", segment("नेपाली"), ["ने", "पा", "ली"]);
+
+    // --- step 8: GPU / CPU parity ---
+    // A source with hard edges and a smooth ramp: flat colour would agree
+    // trivially and hide exactly the disagreements worth finding.
+    const SW = 128, SH = 96;
+    const srcCanvas = document.createElement("canvas");
+    srcCanvas.width = SW;
+    srcCanvas.height = SH;
+    const sctx = srcCanvas.getContext("2d", { willReadFrequently: true });
+    const grad = sctx.createLinearGradient(0, 0, SW, SH);
+    grad.addColorStop(0, "#000");
+    grad.addColorStop(1, "#fff");
+    sctx.fillStyle = grad;
+    sctx.fillRect(0, 0, SW, SH);
+    sctx.fillStyle = "#d02020";
+    sctx.fillRect(10, 10, 40, 30);
+    sctx.fillStyle = "#f0f0f0";
+    sctx.beginPath();
+    sctx.arc(SW * 0.7, SH * 0.6, 24, 0, Math.PI * 2);
+    sctx.fill();
+
+    const maskBytes = new Uint8Array(await (await fetch("/masks/bluenoise64.bin")).arrayBuffer());
+    const bitmap = await createImageBitmap(srcCanvas);
+    const cpu = new StillPipeline(maskBytes);
+    const gpuCanvas = document.createElement("canvas");
+    const gpu = new GpuPipeline(gpuCanvas, maskBytes);
+    const emptyText = new StaticText([]);
+
+    function compare(patch) {
+      const params = new StaticParams();
+      params.update(patch);
+      const resolved = params.resolve(0);
+
+      const cpuCanvas = document.createElement("canvas");
+      cpu.render(bitmap, resolved, emptyText, cpuCanvas);
+      const cpuPixels = cpuCanvas
+        .getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, cpuCanvas.width, cpuCanvas.height).data;
+
+      gpu.render(srcCanvas, SW, SH, resolved);
+      const gpuPixels = gpu.pixels(SW, SH);
+
+      let differing = 0;
+      let worst = 0;
+      for (let i = 0; i < gpuPixels.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+          const delta = Math.abs(cpuPixels[i + c] - gpuPixels[i + c]);
+          if (delta > 0) {
+            worst = Math.max(worst, delta);
+            differing++;
+            break;
+          }
+        }
+      }
+      const pixels = gpuPixels.length / 4;
+      return { differing, worst, pixels, ratio: differing / pixels };
+    }
+
+    // Exact at pixelSize 1: the block is one texel, the mip level is 0, and
+    // nothing but the dither arithmetic is under test.
+    for (const [name, patch] of [
+      ["bayer 4×4", { algorithm: "bayer", pixelSize: 1 }],
+      ["bayer 8×8 levels 4", { algorithm: "bayer", bayerSize: 8, pixelSize: 1, levels: 4 }],
+      ["bayer 2×2 duo", { algorithm: "bayer", bayerSize: 2, pixelSize: 1, outputMode: "duo" }],
+      ["blue noise", { algorithm: "blue-noise", pixelSize: 1 }],
+      ["threshold", { algorithm: "threshold", pixelSize: 1 }],
+      ["bayer colour levels 3", { algorithm: "bayer", pixelSize: 1, outputMode: "color", levels: 3 }],
+    ]) {
+      const r = compare(patch);
+      check(`parity exact at pixelSize 1 — ${name}`, r.differing, 0);
+      if (r.differing > 0) {
+        lines.push(`      ${r.differing}/${r.pixels} pixels differ, worst channel delta ${r.worst}`);
+      }
+    }
+
+    // Above pixelSize 1 the two use different filters by design — mipmap
+    // area-averaging against the canvas downsampler — so this states a
+    // tolerance rather than pretending they can be identical.
+    for (const [name, patch] of [
+      ["pixelSize 2", { algorithm: "bayer", pixelSize: 2 }],
+      ["pixelSize 4", { algorithm: "bayer", pixelSize: 4 }],
+      ["pixelSize 8 levels 4", { algorithm: "bayer", pixelSize: 8, levels: 4 }],
+    ]) {
+      const r = compare(patch);
+      lines.push(`      ${name}: ${(r.ratio * 100).toFixed(1)}% of pixels differ`);
+      check(`parity within tolerance above pixelSize 1 — ${name}`, r.ratio < 0.25, true);
+    }
+
+    // --- text art routes through palette.ts, and owns no ink ---
+    const textBmp = bitmap;
+    function renderText(patch, text) {
+      const params = new StaticParams();
+      params.update(patch);
+      const cv = document.createElement("canvas");
+      cpu.render(textBmp, params.resolve(0), new StaticText(segment(text)), cv);
+      const d = cv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, cv.width, cv.height).data;
+      const seen = new Map();
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] === 0) { seen.set("transparent", (seen.get("transparent") ?? 0) + 1); continue; }
+        const key = `${d[i]},${d[i + 1]},${d[i + 2]}`;
+        seen.set(key, (seen.get(key) ?? 0) + 1);
+      }
+      return seen;
+    }
+    const POEM = "धाका कपडाको बुट्टा जालीमा बुनिन्छ";
+
+    // Flow composes with every output mode: colour comes from the cell's level,
+    // but never all the way to the paper. A glyph painted the colour of the
+    // paper is not carrying tone, it is absent — and at two levels that is every
+    // light cell, so the sentence came out full of holes. Tone reaches the eye
+    // through weight, size and opacity instead.
+    const flowMono = renderText({ text: "flow", pixelSize: 7, levels: 4 }, POEM);
+    check("flow mono still paints a range of greys rather than one ink",
+      [...flowMono.keys()].filter((k) => /^(\d+),\1,\1$/.test(k)).length >= 3, true);
+
+    // Measured as ink on the page rather than as a list of shades: counting
+    // distinct greys counts antialiasing, which says nothing. What matters is
+    // how much of the sentence survives at a low tone count, where every light
+    // cell used to be painted in the paper colour and disappear.
+    const inkShare = (patch) => {
+      const map = renderText({ text: "flow", pixelSize: 7, ...patch }, POEM);
+      let inked = 0;
+      let total = 0;
+      for (const [key, count] of map) {
+        total += count;
+        if (key === "transparent") continue;
+        const [r, g, b] = key.split(",").map(Number);
+        if (0.2126 * r + 0.7152 * g + 0.0722 * b < 240) inked += count;
+      }
+      return inked / total;
+    };
+    const twoTone = inkShare({ levels: 2 });
+    const fourTone = inkShare({ levels: 4 });
+    lines.push(`      flow ink: two levels ${(twoTone * 100).toFixed(1)}%, four levels ${(fourTone * 100).toFixed(1)}%`);
+    check("and at two levels the sentence does not vanish into the paper",
+      twoTone > fourTone * 0.85, true);
+
+    /**
+     * The word gap is a painter's nudge, so the shader has to make the same one
+     * or a video and a still of the same settings space their words
+     * differently.
+     *
+     * Both sides are compared pixel for pixel, against the *same* path at two
+     * gap settings — never against each other, which is why this can be exact:
+     * the atlas rasterizes once where `fillText` shapes per cell, so the two
+     * paths are never identical and never have been.
+     *
+     * They used to be compared as ink coverage, and that measure was reading
+     * the damage rather than the gap. Coverage cannot see a translation — slide
+     * a glyph sideways without hitting anything and the same number of pixels
+     * are inked. It moved only because the unclamped nudge was destroying ink:
+     * on the Canvas path glyphs overlapped and ate each other, and in the
+     * shader they were clipped at the edge of their atlas slot, which cost
+     * nearly a third of the ink at a wide gap. Once both paths were clamped so
+     * a glyph never leaves its cell, coverage went quiet on both — while the
+     * gap itself works. Pixels test the stated property directly.
+     */
+    const gapPixels = (gap, path) => {
+      const gp = new StaticParams();
+      gp.update({ algorithm: "bayer", pixelSize: 8, text: "flow", flowWordGap: gap });
+      const resolved = gp.resolve(0);
+      const flowText = new StaticText(segment(POEM));
+      let data;
+      if (path === "gpu") {
+        const art = textArtFor(
+          resolved, flowText, deva,
+          Math.round(SW / 8), Math.round(SH / (8 * resolved.cellAspect)),
+        );
+        gpu.render(srcCanvas, SW, SH, resolved, art ?? undefined);
+        data = gpu.pixels(SW, SH);
+      } else {
+        const out = document.createElement("canvas");
+        cpu.render(bitmap, resolved, flowText, out);
+        data = out.getContext("2d", { willReadFrequently: true })
+          .getImageData(0, 0, out.width, out.height).data;
+      }
+      return data;
+    };
+    const inkShareOf = (data) => {
+      let inked = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 128) inked++;
+      return inked / (data.length / 4);
+    };
+    const movedShare = (tight, wide) => {
+      let moved = 0;
+      for (let i = 0; i < tight.length; i += 4) {
+        if (Math.abs(tight[i] - wide[i]) > 8) moved++;
+      }
+      return moved / (tight.length / 4);
+    };
+    const cpuTightPx = gapPixels(0, "cpu");
+    const cpuWidePx = gapPixels(1, "cpu");
+    const gpuTightPx = gapPixels(0, "gpu");
+    const gpuWidePx = gapPixels(1, "gpu");
+    const cpuShare = movedShare(cpuTightPx, cpuWidePx);
+    const gpuShare = movedShare(gpuTightPx, gpuWidePx);
+    // Ink is logged, not asserted: what it must *not* do is collapse, which is
+    // what clipping the nudged glyphs looked like.
+    const inkKept = inkShareOf(gpuWidePx) / Math.max(1e-6, inkShareOf(gpuTightPx));
+    lines.push(
+      `      word gap — cpu ${(cpuShare * 100).toFixed(1)}% of pixels move,` +
+      ` gpu ${(gpuShare * 100).toFixed(1)}%; gpu ink kept ${(inkKept * 100).toFixed(0)}%`,
+    );
+    check("the word gap changes what the CPU path draws", cpuShare > 0.002, true);
+    check("and the shader moves with it rather than ignoring it", gpuShare > 0.002, true);
+    // A nudged glyph is moved, never trimmed. Before the shader clamped the
+    // slide to the glyph's own slot this lost 29% of the ink at a wide gap.
+    check("and the shader moves glyphs rather than clipping them", inkKept > 0.95, true);
+
+    /**
+     * The picture has to read *through* the text.
+     *
+     * Flow carries tone in weight, size and opacity — and size and opacity used
+     * to default to 0, so out of the box only weight varied, which is far too
+     * weak to show anything. What was actually carrying the image was the glyph
+     * colour, and once that stopped running all the way to the paper the shape
+     * vanished from the text entirely. A disc on a pale field, measured at its
+     * middle against a corner: if the two are the same, the picture is gone and
+     * only a block of words is left.
+     */
+    const discSrc = document.createElement("canvas");
+    discSrc.width = SW;
+    discSrc.height = SH;
+    {
+      const dctx = discSrc.getContext("2d", { willReadFrequently: true });
+      dctx.fillStyle = "#f2f2f2";
+      dctx.fillRect(0, 0, SW, SH);
+      dctx.fillStyle = "#0d0d0d";
+      dctx.beginPath();
+      dctx.arc(SW * 0.42, SH * 0.5, SH * 0.32, 0, Math.PI * 2);
+      dctx.fill();
+    }
+    const discBmp = await createImageBitmap(discSrc);
+    const flowShape = (patch) => {
+      const fp = new StaticParams();
+      fp.update({ algorithm: "bayer", pixelSize: 6, text: "flow", ...patch });
+      const out = document.createElement("canvas");
+      cpu.render(discBmp, fp.resolve(0), new StaticText(segment(POEM)), out);
+      const d = out.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, out.width, out.height).data;
+      const mean = (x0, x1, y0, y1) => {
+        let sum = 0;
+        let n = 0;
+        for (let y = Math.round(y0 * out.height); y < Math.round(y1 * out.height); y++) {
+          for (let x = Math.round(x0 * out.width); x < Math.round(x1 * out.width); x++) {
+            const i = (y * out.width + x) * 4;
+            sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+            n++;
+          }
+        }
+        return sum / n;
+      };
+      return mean(0.72, 0.98, 0.02, 0.28) - mean(0.30, 0.54, 0.36, 0.64);
+    };
+    const shapeDefault = flowShape({});
+    const shapeFlat = flowShape({ flowSize: 0, flowOpacity: 0 });
+    lines.push(`      flow shape separation: defaults ${shapeDefault.toFixed(0)}, size+opacity off ${shapeFlat.toFixed(0)}`);
+    check("the picture reads through flow's text at the defaults", shapeDefault > 20, true);
+    check("and the modulation axes are what carry it", shapeDefault > shapeFlat, true);
+
+    const flowDuo = renderText(
+      { text: "flow", pixelSize: 7, levels: 4, outputMode: "duo",
+        duoDark: { r: 40, g: 20, b: 90 }, duoLight: { r: 250, g: 220, b: 120 } }, POEM);
+    check("flow duo uses the duo ramp", flowDuo.has("40,20,90") && flowDuo.has("250,220,120"), true);
+
+    const flowColor = renderText({ text: "flow", pixelSize: 6, levels: 3, outputMode: "color" }, POEM);
+    const chromatic = [...flowColor.keys()].filter((k) => {
+      const [r, g, b] = k.split(",").map(Number);
+      return k !== "transparent" && !(r === g && g === b);
+    });
+    check("flow colour dithers per channel", chromatic.length > 0, true);
+
+    // Ramp reduces to ink on paper, both taken from palette levels.
+    // `fillText` antialiases, so the glyph edges blend ink into paper and the
+    // exact two colours never appear alone. What "ink on paper" means is that
+    // every painted pixel lies on the segment between them — no third hue, and
+    // no per-level colour, which is what would flatten the ladder.
+    const rampMono = renderText({ text: "ramp", pixelSize: 6 }, POEM);
+    const monoKeys = [...rampMono.keys()].filter((k) => k !== "transparent");
+    const monoValues = monoKeys.map((k) => k.split(",").map(Number));
+    check("ramp mono paints only greys", monoValues.every(([r, g, b]) => r === g && g === b), true);
+    check("ramp mono spans black ink to white paper",
+      Math.min(...monoValues.map((v) => v[0])) < 30 && Math.max(...monoValues.map((v) => v[0])) === 255,
+      true);
+
+    const DARK = { r: 40, g: 20, b: 90 };
+    const LIGHT = { r: 250, g: 220, b: 120 };
+    const rampDuo = renderText(
+      { text: "ramp", pixelSize: 6, outputMode: "duo", duoDark: DARK, duoLight: LIGHT }, POEM);
+    const duoValues = [...rampDuo.keys()].filter((k) => k !== "transparent").map((k) => k.split(",").map(Number));
+    // Tolerance 4, not 0: Chromium antialiases text per subpixel, so R, G and B
+    // receive slightly different coverage and no painted pixel sits exactly on
+    // the line. It is still far tighter than the regression this guards — an
+    // ink pair of its own would paint greys, which miss the duo line by ~24.
+    const onDuoLine = duoValues.every(([r, g, b]) => {
+      const t = (r - DARK.r) / (LIGHT.r - DARK.r);
+      return (
+        Math.abs(g - (DARK.g + t * (LIGHT.g - DARK.g))) <= 4 &&
+        Math.abs(b - (DARK.b + t * (LIGHT.b - DARK.b))) <= 4
+      );
+    });
+    const offenders = duoValues.filter(([r, g, b]) => {
+      const t = (r - DARK.r) / (LIGHT.r - DARK.r);
+      return (
+        Math.abs(g - (DARK.g + t * (LIGHT.g - DARK.g))) > 4 ||
+        Math.abs(b - (DARK.b + t * (LIGHT.b - DARK.b))) > 4
+      );
+    });
+    if (offenders.length > 0) {
+      lines.push(`      ${offenders.length} off-line of ${duoValues.length}; first few: ${JSON.stringify(offenders.slice(0, 6))}`);
+    }
+    check("ramp duo paints only along the duoDark→duoLight line", onDuoLine, true);
+    check("ramp duo spans that line",
+      Math.min(...duoValues.map((v) => v[0])) < 60 && Math.max(...duoValues.map((v) => v[0])) > 240,
+      true);
+
+    const rampCut = renderText({ text: "ramp", pixelSize: 6, cutLightest: true }, POEM);
+    check("ramp cutout leaves the paper transparent", rampCut.has("transparent"), true);
+
+    // Colour in ramp mode carries hue only: a greyscale source must come out
+    // identical to mono, or the tint is smuggling tone back in.
+    const greySrc = document.createElement("canvas");
+    greySrc.width = 120; greySrc.height = 90;
+    const gctx = greySrc.getContext("2d", { willReadFrequently: true });
+    const ggrad = gctx.createLinearGradient(0, 0, 120, 90);
+    ggrad.addColorStop(0, "#000"); ggrad.addColorStop(1, "#fff");
+    gctx.fillStyle = ggrad; gctx.fillRect(0, 0, 120, 90);
+    const greyBmp = await createImageBitmap(greySrc);
+    const greyRender = (mode) => {
+      const p = new StaticParams();
+      p.update({ text: "ramp", pixelSize: 5, outputMode: mode });
+      const cv = document.createElement("canvas");
+      cpu.render(greyBmp, p.resolve(0), new StaticText(segment(POEM)), cv);
+      return cv.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, cv.width, cv.height).data;
+    };
+    const greyMono = greyRender("mono");
+    const greyColor = greyRender("color");
+    let greyDiff = 0;
+    for (let i = 0; i < greyMono.length; i++) if (greyMono[i] !== greyColor[i]) greyDiff++;
+    check("greyscale in ramp colour is identical to mono", greyDiff, 0);
+
+    check("no param carries a text ink pair",
+      Object.keys(new StaticParams().resolve(0)).filter((k) => /^text(Ink|Paper)$/.test(k)).length, 0);
+
+    // --- the UI actually disables Color in ramp mode, with its reason shown ---
+    const frame = document.createElement("iframe");
+    frame.src = "/";
+    frame.style.cssText = "width:420px;height:600px;border:1px solid #000";
+    document.body.append(frame);
+    await new Promise((resolve) => frame.addEventListener("load", resolve));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const doc = frame.contentDocument;
+    const fire = (id, value, type) => {
+      const el = doc.getElementById(id);
+      el.value = value;
+      el.dispatchEvent(new frame.contentWindow.Event(type, { bubbles: true }));
+    };
+
+    fire("outputMode", "color", "change");
+    check("colour is selectable before ramp is chosen", doc.getElementById("outputMode").value, "color");
+
+    fire("text", "ramp", "change");
+    check("ramp keeps all three ink modes selectable",
+      doc.querySelector('#outputMode option[value="color"]').disabled, false);
+    check("a Color selection survives switching to ramp",
+      doc.getElementById("outputMode").value, "color");
+    const noteEl = doc.querySelector('[data-i18n="note.rampColor"]');
+    check("ramp + colour explains what colour means here", noteEl.hidden, false);
+    check("the note is not empty", noteEl.textContent.trim().length > 0, true);
+    fire("outputMode", "mono", "change");
+
+    // The ink pair must be reachable from Density mode itself.
+    check("ramp shows the ink pair without picking Duo first",
+      doc.querySelector('[data-when="inkPair"]').hidden, false);
+    check("ramp starts in mono", doc.getElementById("outputMode").value, "mono");
+
+    const dark = doc.getElementById("duoDark");
+    dark.value = "#cc2244";
+    dark.dispatchEvent(new frame.contentWindow.Event("input", { bubbles: true }));
+    check("choosing an ink in ramp switches the mode rather than ignoring it",
+      doc.getElementById("outputMode").value, "duo");
+    check("and the Mode select shows it", doc.getElementById("outputMode").selectedOptions[0].value, "duo");
+
+    fire("text", "flow", "change");
+    check("flow hides the ramp-colour note",
+      doc.querySelector('[data-i18n="note.rampColor"]').hidden, true);
+    frame.remove();
+
+    // --- step 9: video decode → process → encode, with the audio carried ---
+    const { ArrayBufferTarget: FixTarget, Muxer: FixMuxer } = await import("mp4-muxer");
+    const { decodeFrames, inspect } = await import("/src/video/decode.ts");
+    const { exportVideo, pathFor } = await import("/src/video/pipeline.ts");
+
+    /**
+     * A real MP4 with a real AAC track, built here rather than committed. A
+     * fixture binary in the repo would be a fixture directory by another name,
+     * and this also proves the encoder half independently of the decoder half.
+     */
+    async function makeFixture(frames = 20, fps = 10, rotation = 0) {
+      const W = 64, H = 48, SR = 48000;
+      const muxer = new FixMuxer({
+        target: new FixTarget(),
+        video: { codec: "avc", width: W, height: H, ...(rotation ? { rotation } : {}) },
+        audio: { codec: "aac", numberOfChannels: 1, sampleRate: SR },
+        fastStart: "in-memory",
+      });
+      const venc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: (e) => { throw e; } });
+      venc.configure({ codec: "avc1.42001f", width: W, height: H, bitrate: 300000, framerate: fps, avc: { format: "avc" } });
+      const cv = document.createElement("canvas");
+      cv.width = W; cv.height = H;
+      const cx = cv.getContext("2d");
+      for (let i = 0; i < frames; i++) {
+        const gr = cx.createLinearGradient(0, 0, W, 0);
+        gr.addColorStop(0, "#000"); gr.addColorStop(1, "#fff");
+        cx.fillStyle = gr; cx.fillRect(0, 0, W, H);
+        cx.fillStyle = "#fff"; cx.fillRect((i * 3) % W, 12, 8, 8);
+        const f = new VideoFrame(cv, { timestamp: Math.round((i * 1e6) / fps), duration: Math.round(1e6 / fps) });
+        venc.encode(f, { keyFrame: i === 0 });
+        f.close();
+      }
+      await venc.flush(); venc.close();
+
+      const aenc = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: (e) => { throw e; } });
+      aenc.configure({ codec: "mp4a.40.2", sampleRate: SR, numberOfChannels: 1, bitrate: 96000 });
+      const total = Math.round((SR * frames) / fps);
+      for (let off = 0; off < total; off += 1024) {
+        const n = Math.min(1024, total - off);
+        const data = new Float32Array(n);
+        for (let k = 0; k < n; k++) data[k] = Math.sin((2 * Math.PI * 440 * (off + k)) / SR) * 0.2;
+        aenc.encode(new AudioData({
+          format: "f32-planar", sampleRate: SR, numberOfFrames: n, numberOfChannels: 1,
+          timestamp: Math.round((off / SR) * 1e6), data,
+        }));
+      }
+      await aenc.flush(); aenc.close();
+      muxer.finalize();
+      return new File([muxer.target.buffer], "fixture.mp4", { type: "video/mp4" });
+    }
+
+    stage("building the video fixture");
+    const fixture = await makeFixture();
+    stage("demuxing the fixture");
+    const probe = await inspect(fixture);
+    check("fixture demuxes to the right video track",
+      [probe.source.width, probe.source.height, probe.source.frameCount], [64, 48, 20]);
+    check("the source audio track is found", probe.source.audio?.codec.startsWith("mp4a"), true);
+    check("audio samples are carried as encoded data, not decoded",
+      probe.source.audio.samples.length > 0 && probe.source.audio.samples[0].data instanceof Uint8Array, true);
+
+    const { chooseEncoding, evenDimension } = await import("/src/video/encode.ts");
+    const chosen = await chooseEncoding(probe.source.width, probe.source.height, probe.source.fps, 1_000_000);
+    // The probe must describe the configuration that is actually used; checking
+    // one config and configuring with another is how a passing probe still
+    // throws NotSupportedError at configure() time.
+    const supported = await VideoEncoder.isConfigSupported(chosen.config);
+    check("the chosen encoding is the one that gets probed", supported.supported, true);
+    check("and its dimensions are even", [chosen.config.width % 2, chosen.config.height % 2], [0, 0]);
+    check("odd track dimensions are made encodable", evenDimension(641), 640);
+
+    const videoParams = new StaticParams();
+    videoParams.update({ algorithm: "blue-noise", pixelSize: 2 });
+    check("blue noise on video takes the GPU path", pathFor(videoParams.resolve(0)), "gpu");
+
+    const seen = [];
+    stage("exporting video");
+    const exported = await exportVideo({
+      file: fixture, params: videoParams, text: emptyText, cpu, gpu,
+      bitrate: 1_000_000, onProgress: (p) => seen.push(p.frame),
+    });
+    check("every frame was encoded", exported.frames, 20);
+    // Reported alongside, so a short export can be surfaced rather than handed
+    // over as a success. A truncated file that claims to have worked is the
+    // worst outcome available here.
+    check("and the export knows how many were expected", exported.expectedFrames, 20);
+    check("progress was reported for each", seen.length, 20);
+    check("the export is an mp4", exported.container, "mp4");
+    check("the exporter says the audio was kept", exported.audioKept, true);
+
+    // The acceptance criterion, checked on the actual file rather than a flag.
+    stage("re-inspecting the exported file");
+    const roundTrip = await inspect(new File([exported.blob], "out.mp4", { type: "video/mp4" }));
+    check("the exported file still has its audio", roundTrip.source.audio !== null, true);
+    check("with every audio sample intact",
+      roundTrip.source.audio?.samples.length, probe.source.audio?.samples.length);
+    check("and the video track intact",
+      [roundTrip.source.width, roundTrip.source.height, roundTrip.source.frameCount], [64, 48, 20]);
+
+    // The CPU path for video was untested and broken: a VideoFrame reports its
+    // size as displayWidth, never width, so reading `.width` produced a NaN
+    // grid. Error diffusion and text art both route here, so this exercises it.
+    stage("exporting video on the CPU path");
+    const cpuParams = new StaticParams();
+    cpuParams.update({ algorithm: "floyd-steinberg", pixelSize: 2 });
+    check("error diffusion on video takes the CPU path", pathFor(cpuParams.resolve(0)), "cpu");
+    const cpuExport = await exportVideo({
+      file: fixture, params: cpuParams, text: emptyText, cpu, gpu, bitrate: 1_000_000,
+    });
+    check("the CPU path encodes every frame too", cpuExport.frames, 20);
+    check("and produces a playable file", cpuExport.blob.size > 0, true);
+    const cpuRound = await inspect(new File([cpuExport.blob], "cpu.mp4", { type: "video/mp4" }));
+    check("with its video track intact",
+      [cpuRound.source.width, cpuRound.source.height, cpuRound.source.frameCount], [64, 48, 20]);
+    check("and its audio intact", cpuRound.source.audio !== null, true);
+
+    /**
+     * The export must come back the *length* it went in.
+     *
+     * Timestamps used to be reconstructed as `index / fps`, which spaces every
+     * frame by the average rate. That is right only for constant-frame-rate
+     * material — and phones record variable frame rate as a matter of course, so
+     * a real recording came out a different length from the source, by an amount
+     * that depended on the clip. The fixture here holds three frames six times
+     * longer than the rest, which an average flattens away.
+     */
+    stage("export keeps the source's length");
+    const vfrGaps = [1000, 1000, 6000, 1000, 1000, 6000, 1000, 1000, 6000, 1000];
+    const vfrScale = 30000;
+    const vfrMuxer = new FixMuxer({
+      target: new FixTarget(),
+      video: { codec: "avc", width: 64, height: 48 },
+      fastStart: "in-memory",
+    });
+    {
+      const enc = new VideoEncoder({
+        output: (c, m) => vfrMuxer.addVideoChunk(c, m),
+        error: (e) => { throw e; },
+      });
+      enc.configure({ codec: "avc1.42001f", width: 64, height: 48, bitrate: 500000, avc: { format: "avc" } });
+      const cv = document.createElement("canvas");
+      cv.width = 64;
+      cv.height = 48;
+      const cx = cv.getContext("2d");
+      let ticks = 0;
+      for (let i = 0; i < vfrGaps.length; i++) {
+        cx.fillStyle = "#111";
+        cx.fillRect(0, 0, 64, 48);
+        cx.fillStyle = "#eee";
+        cx.fillRect((i * 3) % 56, 4, 8, 8);
+        const f = new VideoFrame(cv, {
+          timestamp: Math.round((ticks / vfrScale) * 1e6),
+          duration: Math.round((vfrGaps[i] / vfrScale) * 1e6),
+        });
+        ticks += vfrGaps[i];
+        enc.encode(f, { keyFrame: i === 0 });
+        f.close();
+      }
+      await enc.flush();
+      enc.close();
+    }
+    vfrMuxer.finalize();
+    const vfrFile = new File([vfrMuxer.target.buffer], "vfr.mp4", { type: "video/mp4" });
+    const vfrSeconds = vfrGaps.reduce((a, b) => a + b, 0) / vfrScale;
+
+    const vfrParams = new StaticParams();
+    vfrParams.update({ algorithm: "bayer", pixelSize: 2 });
+    const vfrExport = await exportVideo({
+      file: vfrFile, params: vfrParams, text: emptyText, cpu, gpu, bitrate: 1_000_000,
+    });
+    const vfrBack = await inspect(new File([vfrExport.blob], "o.mp4", { type: "video/mp4" }));
+    const vfrStamps = [];
+    await decodeFrames(vfrBack.mp4, vfrBack.source, (f) => {
+      vfrStamps.push(f.timestamp / 1e6);
+      f.close();
+    });
+    const vfrOut = (vfrStamps[vfrStamps.length - 1] ?? 0) + vfrGaps[vfrGaps.length - 1] / vfrScale;
+    lines.push(`      variable-rate source ${vfrSeconds.toFixed(3)}s → export ${vfrOut.toFixed(3)}s`);
+    check("a variable-frame-rate clip keeps its length",
+      Math.abs(vfrOut - vfrSeconds) < 0.02, true);
+
+    // The export must come back the size and orientation it went in.
+    //
+    // The track header is not the authority on either. A phone records a
+    // landscape bitstream and puts the portrait orientation in the tkhd matrix,
+    // so an encoder sized from the header re-encodes every frame into the wrong
+    // shape, and an export that drops the matrix hands back a file the player
+    // lays out on its side. Both read to the user as "it changed the size of my
+    // video", and neither is visible in a frame count.
+    stage("export keeps the source's shape");
+    const rotFixture = await makeFixture(8, 10, 90);
+    const rotProbe = await inspect(rotFixture);
+    check("the container's rotation is read", rotProbe.source.rotation, 90);
+
+    // What the decoder actually hands the renderer, which is what the encoder
+    // has to be configured for.
+    let decodedSize = null;
+    await decodeFrames(rotProbe.mp4, rotProbe.source, (f, i) => {
+      if (i === 0) decodedSize = [f.displayWidth, f.displayHeight];
+      f.close();
+    });
+    check("the decoder hands over the coded size, not the header's", decodedSize, [64, 48]);
+
+    for (const [pathLabel, patch] of [
+      ["gpu", { algorithm: "bayer", pixelSize: 2 }],
+      ["cpu", { algorithm: "floyd-steinberg", pixelSize: 2 }],
+    ]) {
+      const rotParams = new StaticParams();
+      rotParams.update(patch);
+      const rotExport = await exportVideo({
+        file: rotFixture, params: rotParams, text: emptyText, cpu, gpu, bitrate: 1_000_000,
+      });
+      const rotBack = await inspect(new File([rotExport.blob], "rot.mp4", { type: "video/mp4" }));
+      check(`${pathLabel} export keeps the frame's own dimensions`,
+        [rotBack.source.width, rotBack.source.height], decodedSize);
+      check(`${pathLabel} export carries the rotation through`, rotBack.source.rotation, 90);
+    }
+
+    // Text art on video routes through the CPU path as well.
+    stage("exporting text-art video");
+    const textParams = new StaticParams();
+    textParams.update({ algorithm: "bayer", pixelSize: 4, text: "ramp" });
+    const textExport = await exportVideo({
+      file: fixture, params: textParams, text: new StaticText(segment("धाका")), cpu, gpu, bitrate: 1_000_000,
+    });
+    check("text art on video encodes every frame", textExport.frames, 20);
+
+    // The element fallback is the only path that works for codecs WebCodecs
+    // refuses — 10-bit HEVC from an iPhone being the case that forced it. It is
+    // exercised directly, because no synthetic fixture can be un-decodable.
+    /**
+     * The fallback must deliver the whole clip, and must not call a failure an
+     * ending.
+     *
+     * A rejected `play()` used to resolve the run, so an export finished
+     * "successfully" with only the frames gathered so far — a file cut off at
+     * whatever moment playback stopped, with nothing on screen to say so. That
+     * is the one outcome that must never be silent, because the export is the
+     * expensive thing the user cannot cheaply redo.
+     */
+    stage("decoding through the element fallback");
+    const { canDecode, decodeFramesViaElement } = await import("/src/video/decode.ts");
+    check("WebCodecs handles the fixture's own codec", await canDecode(probe.source), true);
+
+
+    // The export must not be re-decodable into a run of identical frames. This
+    // is the check that a stuck-frame export fails and every count-based check
+    // passes, so it guards the whole path rather than one cause of it.
+    stage("checking exported frames actually differ");
+    const outFile = new File([exported.blob], "out.mp4", { type: "video/mp4" });
+    const outProbe = await inspect(outFile);
+    const outDistinct = new Set();
+    await decodeFrames(outProbe.mp4, outProbe.source, (f) => {
+      const probe = document.createElement("canvas");
+      probe.width = 16;
+      probe.height = 12;
+      const pctx = probe.getContext("2d", { willReadFrequently: true });
+      pctx.drawImage(f, 0, 0, 16, 12);
+      outDistinct.add(pctx.getImageData(0, 0, 16, 12).data.join(","));
+      f.close();
+    });
+    check("the exported video is not one frozen frame", outDistinct.size >= 10, true);
+
+    const seenFrames = [];
+    await decodeFramesViaElement(fixture, (el, i, mediaTime) => {
+      seenFrames.push([i, el.videoWidth, el.videoHeight, mediaTime]);
+    });
+    // Playback can drop a frame where seeking could not, so this asserts most
+    // of them arrive rather than all — and that timing stays true regardless.
+    check("the fallback captures the clip", seenFrames.length >= 18 && seenFrames.length <= 20, true);
+    check("in order", seenFrames.map((f) => f[0]).every((n, i) => n === i), true);
+    check("with usable dimensions", seenFrames[0].slice(1, 3), [64, 48]);
+    check("media time advances monotonically",
+      seenFrames.every((f, i) => i === 0 || f[3] > seenFrames[i - 1][3]), true);
+    // The run has to reach the end of the media, not stop in the middle. A
+    // rejected `play()` used to resolve the whole thing as though the clip had
+    // ended, which wrote an export cut off wherever playback happened to stop.
+    lines.push(`      the fallback reached ${seenFrames[seenFrames.length - 1][3].toFixed(2)}s of ${probe.source.duration.toFixed(2)}s`);
+    check("and reaches the end of the media rather than stopping partway",
+      seenFrames[seenFrames.length - 1][3] >= probe.source.duration - 0.25, true);
+    check("and spans the clip", seenFrames.at(-1)[3] > 1.7, true);
+
+    // An export must leave the preview usable. Restoring its position looks
+    // harmless but is a seek, and a seek is what kills playback on the codecs
+    // that need the fallback in the first place — the frame then freezes.
+    stage("export leaves the preview alive and running");
+    const preview = document.createElement("video");
+    preview.muted = true;
+    preview.loop = true;
+    preview.playsInline = true;
+    preview.src = URL.createObjectURL(fixture);
+    await new Promise((r) => preview.addEventListener("loadeddata", r, { once: true }));
+
+    // Each export below gets its own pipelines. Sharing them makes the preview
+    // and the export resize each other's scratch buffers every frame, at two
+    // different resolutions.
+    const exportPair = () => ({
+      cpu: new StillPipeline(maskBytes),
+      gpu: new GpuPipeline(document.createElement("canvas"), maskBytes),
+    });
+    const quick = new StaticParams();
+    quick.update({ algorithm: "bayer", pixelSize: 3 });
+
+    // 1. Paused across an export: the position must not move. Restoring
+    //    `currentTime` afterwards looks harmless but is a seek, and a seek is
+    //    what kills playback on the codecs that need the fallback.
+    await preview.play().catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+    preview.pause();
+    const pausedAt = preview.currentTime;
+    await exportVideo({ file: fixture, params: quick, text: emptyText, ...exportPair(), bitrate: 500_000 });
+    check("the preview survives an export", preview.error, null);
+    check("and is still decodable", preview.readyState >= 2, true);
+    check("and was not seeked out from under the user",
+      Math.abs(preview.currentTime - pausedAt) < 0.001, true);
+
+    // 2. Playing across an export: it must keep running. Pausing it bought
+    //    nothing — an element holds its decoder while `src` is set, playing or
+    //    not — and froze the picture for the whole export.
+    await preview.play().catch(() => {});
+    const runningAt = preview.currentTime;
+    await exportVideo({ file: fixture, params: quick, text: emptyText, ...exportPair(), bitrate: 500_000 });
+    check("the preview keeps playing through an export", preview.currentTime > runningAt, true);
+    check("and was not paused by it", preview.paused, false);
+
+    await preview.play().catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+    check("and still plays afterwards", preview.currentTime > runningAt, true);
+    preview.pause();
+    URL.revokeObjectURL(preview.src);
+
+    // Boiling is what ordered dithering exists to avoid: the same frame at two
+    // different timestamps must dither identically, or video crawls.
+    const stillFrame = await createImageBitmap(srcCanvas);
+    const stable = new StaticParams();
+    stable.update({ algorithm: "blue-noise", pixelSize: 3 });
+    gpu.render(stillFrame, SW, SH, stable.resolve(0));
+    const passOne = gpu.pixels(SW, SH);
+    gpu.render(stillFrame, SW, SH, stable.resolve(7.5));
+    const passTwo = gpu.pixels(SW, SH);
+    let boil = 0;
+    for (let i = 0; i < passOne.length; i++) if (passOne[i] !== passTwo[i]) boil++;
+    check("blue noise does not boil between frames", boil, 0);
+
+    // The source texture is held across frames rather than rebuilt, so the one
+    // thing that must be proved is that a *new* frame actually reaches the GPU.
+    // A stale texture would look perfect in every parity check above — those
+    // all render the same bitmap — and would freeze an exported video on its
+    // first frame, which is the worst way to find out.
+    const secondCanvas = document.createElement("canvas");
+    secondCanvas.width = SW;
+    secondCanvas.height = SH;
+    const sctx2 = secondCanvas.getContext("2d");
+    sctx2.fillStyle = "#ffffff";
+    sctx2.fillRect(0, 0, SW, SH);
+    sctx2.fillStyle = "#000000";
+    sctx2.fillRect(0, 0, SW, SH / 2);
+    const secondFrame = await createImageBitmap(secondCanvas);
+    gpu.render(stillFrame, SW, SH, stable.resolve(0));
+    const reusedA = gpu.pixels(SW, SH);
+    gpu.render(secondFrame, SW, SH, stable.resolve(0));
+    const reusedB = gpu.pixels(SW, SH);
+    let reusedDiffer = 0;
+    for (let i = 0; i < reusedA.length; i += 4) if (reusedA[i] !== reusedB[i]) reusedDiffer++;
+    check(
+      "a second frame reaches the reused source texture",
+      reusedDiffer > reusedA.length / 4 / 10,
+      true,
+    );
+
+    // --- step 10: text art on the GPU, via the glyph atlas ---
+    stage("glyph atlas");
+    const { buildAtlas, flowToTexture, rampToAtlas } = await import("/src/glyph/atlas.ts");
+    const { buildRamp } = await import("/src/glyph/ramp.ts");
+    const { layoutFlow } = await import("/src/glyph/layout.ts");
+    const { measureAll } = await import("/src/glyph/density.ts");
+    const { segmentWords, uniqueClusters } = await import("/src/glyph/segment.ts");
+
+    const ATLAS_TEXT = "धाका कपडाको बुट्टा";
+    const atlasClusters = uniqueClusters(segment(ATLAS_TEXT));
+    const sheet = buildAtlas(atlasClusters, deva);
+    // Eight glyphs land in a 3×3 grid on a 256px sheet: 192px of cells. Scaling
+    // atlas UVs by 1/grid rather than by the real cell size stretches every
+    // lookup and samples the gaps.
+    check("the atlas reports its cell size, not just its grid",
+      Math.abs(sheet.cellUV - sheet.cell / sheet.canvas.width) < 1e-9, true);
+    check("and that differs from 1/grid when the sheet is padded",
+      sheet.grid * sheet.cell !== sheet.canvas.width ? sheet.cellUV !== 1 / sheet.grid : true, true);
+    check("the atlas is square and power-of-two",
+      [sheet.canvas.width === sheet.canvas.height, (sheet.canvas.width & (sheet.canvas.width - 1)) === 0],
+      [true, true]);
+    check("every non-blank cluster gets a slot",
+      sheet.indexOf.size, atlasClusters.filter((c) => c.trim() !== "").length);
+    check("blanks take no slot", sheet.indexOf.has(" "), false);
+
+    // Each occupied cell must actually contain ink, or the sheet is a grid of
+    // nothing and the shader would draw a blank image with no error anywhere.
+    const actx = sheet.canvas.getContext("2d", { willReadFrequently: true });
+    let inkedCells = 0;
+    for (let i = 0; i < sheet.clusters.length; i++) {
+      const cx = (i % sheet.grid) * 64;
+      const cy = Math.floor(i / sheet.grid) * 64;
+      const px = actx.getImageData(cx, cy, 64, 64).data;
+      let ink = 0;
+      for (let k = 3; k < px.length; k += 4) ink += px[k];
+      if (ink > 0) inkedCells++;
+    }
+    check("every atlas cell carries ink", inkedCells, sheet.clusters.length);
+
+    const measured = measureAll(atlasClusters, deva);
+    const atlasRamp = buildRamp(measured, 8);
+    const ranks = rampToAtlas(atlasRamp, sheet);
+    check("the ramp maps onto atlas cells", ranks.length, atlasRamp.length);
+    check("and its blank rung maps to nothing", ranks[ranks.length - 1], -1);
+
+    const flowLayout = layoutFlow(segmentWords(ATLAS_TEXT), 8, 4, { keepWords: true, fit: "repeat" });
+    const cellData = flowToTexture(flowLayout.cells, flowLayout.clusters, sheet);
+    check("flow's cell texture covers the grid", cellData.length, 32);
+    check("and marks empty cells as 255",
+      cellData.every((v) => v === 255 || v < sheet.clusters.length), true);
+
+    // The real claim: the shader draws the same picture as fillText.
+    stage("GPU text art against the CPU");
+    const atlasParams = new StaticParams();
+    atlasParams.update({ algorithm: "bayer", pixelSize: 8, text: "ramp", glyphSteps: 8 });
+    const atlasText = new StaticText(segment(ATLAS_TEXT));
+
+    const cpuText = document.createElement("canvas");
+    cpu.render(bitmap, atlasParams.resolve(0), atlasText, cpuText);
+    const cpuInk = cpuText.getContext("2d", { willReadFrequently: true })
+      .getImageData(0, 0, cpuText.width, cpuText.height).data;
+
+    gpu.render(srcCanvas, SW, SH, atlasParams.resolve(0), {
+      mode: "ramp", ramp: atlasRamp, fontFamily: deva, version: atlasText.version,
+    });
+    const gpuInk = gpu.pixels(SW, SH);
+
+    const inked = (data) => {
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 128) n++;
+      return n / (data.length / 4);
+    };
+    const cpuCoverage = inked(cpuInk);
+    const gpuCoverage = inked(gpuInk);
+    lines.push(`      ink coverage: cpu ${(cpuCoverage * 100).toFixed(1)}%, gpu ${(gpuCoverage * 100).toFixed(1)}%`);
+    check("the GPU draws glyphs at all", gpuCoverage > 0.01, true);
+    // Not pixel parity: the atlas rasterizes once at a fixed size and the
+    // shader scales it, where fillText shapes per cell. Comparable ink is the
+    // honest claim.
+    check("with comparable ink to the CPU path",
+      Math.abs(cpuCoverage - gpuCoverage) < 0.12, true);
+
+    // Duo ink on the GPU: uDark/uLight are 0–255 while shader colour is 0–1, so
+    // using them raw clamps every ink colour to white and the glyphs vanish.
+    // Mono hides that bug, because 0 and 255 clamp to exactly black and white.
+    const duoParams = new StaticParams();
+    duoParams.update({
+      algorithm: "bayer", pixelSize: 8, text: "ramp", glyphSteps: 8, outputMode: "duo",
+      duoDark: { r: 30, g: 20, b: 80 }, duoLight: { r: 245, g: 230, b: 200 },
+    });
+    gpu.render(srcCanvas, SW, SH, duoParams.resolve(0), {
+      mode: "ramp", ramp: atlasRamp, fontFamily: deva, version: atlasText.version,
+    });
+    const duoPixels = gpu.pixels(SW, SH);
+    let darkInk = 0;
+    for (let i = 0; i < duoPixels.length; i += 4) if (duoPixels[i] < 120) darkInk++;
+    check("GPU ramp in duo actually paints its ink", darkInk > 0, true);
+
+    // Ramp in colour mode carries hue and nothing else. The shader had no tint
+    // at all and drew flat black ink, which mono and duo both hide — only a
+    // saturated region compared per channel catches it. The grey region is the
+    // other half of the claim: an unsaturated cell must come back to the ink,
+    // or the tint is carrying tone as well as hue and the ladder flattens.
+    const colorParams = new StaticParams();
+    colorParams.update({
+      algorithm: "bayer", pixelSize: 8, text: "ramp", glyphSteps: 8, outputMode: "color",
+    });
+    gpu.render(srcCanvas, SW, SH, colorParams.resolve(0), {
+      mode: "ramp", ramp: atlasRamp, fontFamily: deva, version: atlasText.version,
+    });
+    const tinted = gpu.pixels(SW, SH);
+    // Over inked pixels only: paper is white in every mode and would swamp the
+    // channel difference the check is looking for.
+    const inkBalance = (data, x0, y0, w, h) => {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = y0; y < y0 + h; y++) {
+        for (let x = x0; x < x0 + w; x++) {
+          const p = (y * SW + x) * 4;
+          if (data[p] > 200 && data[p + 1] > 200 && data[p + 2] > 200) continue;
+          r += data[p]; g += data[p + 1]; b += data[p + 2]; n++;
+        }
+      }
+      return n === 0 ? null : { r: r / n, g: g / n, b: b / n, n };
+    };
+    const redInk = inkBalance(tinted, 12, 12, 34, 24);
+    const greyInk = inkBalance(tinted, 2, SH - 34, 30, 30);
+    lines.push(
+      `      ramp ink balance: red region ${redInk ? `${redInk.r.toFixed(0)}/${redInk.g.toFixed(0)}/${redInk.b.toFixed(0)}` : "none"}` +
+      `, grey region ${greyInk ? `${greyInk.r.toFixed(0)}/${greyInk.g.toFixed(0)}/${greyInk.b.toFixed(0)}` : "none"}`,
+    );
+    check("GPU ramp in colour tints the glyph with the cell's hue",
+      redInk !== null && redInk.r > redInk.g + 20 && redInk.r > redInk.b + 20, true);
+    check("and an unsaturated cell comes back to the ink",
+      greyInk !== null && Math.abs(greyInk.r - greyInk.g) < 8 && Math.abs(greyInk.g - greyInk.b) < 8, true);
+
+    // Ink coverage alone cannot tell a tonal ladder from a uniform grid of one
+    // character: both can average the same. The image must show *through* the
+    // text, so a dark region has to carry visibly more ink than a light one.
+    const regionInk = (data, x0, y0, w, h) => {
+      let n = 0;
+      for (let y = y0; y < y0 + h; y++) {
+        for (let x = x0; x < x0 + w; x++) {
+          if (data[(y * SW + x) * 4] < 128) n++;
+        }
+      }
+      return n / (w * h);
+    };
+    gpu.render(srcCanvas, SW, SH, atlasParams.resolve(0), {
+      mode: "ramp", ramp: atlasRamp, fontFamily: deva, version: atlasText.version,
+    });
+    const tonal = gpu.pixels(SW, SH);
+    const darkRegion = regionInk(tonal, 2, 2, 30, 30);
+    const lightRegion = regionInk(tonal, Math.round(SW * 0.62), Math.round(SH * 0.5), 24, 24);
+    lines.push(`      GPU ramp ink: dark corner ${(darkRegion * 100).toFixed(0)}%, light circle ${(lightRegion * 100).toFixed(0)}%`);
+    check("the image shows through the glyphs", darkRegion > lightRegion + 0.08, true);
+
+    // --- रञ्जना / Ranjana as a third face ---
+    stage("Ranjana");
+    const { varnamala } = await import("/src/glyph/varnamala.ts");
+    const ranjana = FONT_STACK.ranjana;
+
+    // The face has to have actually loaded. An OTF that failed to fetch falls
+    // through the stack, and every check below would then be measuring the
+    // generic — passing, and meaning nothing.
+    check("Ranjana draws क differently from Devanagari",
+      alphaDiff2("क", ranjana, deva) > 0, true);
+
+    /**
+     * The runtime probe must agree with `npm run ranjana:audit`, which reads
+     * the cmap offline. Two independent routes to the same answer: the audit
+     * cannot see rendering and the probe cannot see the cmap, so agreement is
+     * real evidence rather than one method checking itself.
+     *
+     * These eight are what release 1.000 is missing from the letters.
+     */
+    const pool = varnamala();
+    const dropped = pool.filter((c) => !isSupported(c, ranjana));
+    check("the runtime probe drops exactly what the cmap audit reports missing",
+      dropped, ["ऍ", "ऎ", "ऑ", "ऒ", "ऩ", "ऱ", "ळ", "ऴ"]);
+    check("leaving the 45-letter pool the audit names", pool.length - dropped.length, 45);
+
+    /**
+     * The stack must NOT fall through to Devanagari.
+     *
+     * Ranjana is mapped onto Devanagari codepoints, so a Noto behind it would
+     * draw every missing letter in the wrong alphabet — and the probe would
+     * report full coverage, because a bundled face did draw it. The user would
+     * get a picture made of two scripts with nothing saying so. This is the
+     * check that catches someone "fixing" the stack to match the other two.
+     */
+    check("Ranjana does not fall through to Devanagari", isSupported("ऱ", ranjana), false);
+    check("while Devanagari itself still covers it", isSupported("ऱ", deva), true);
+
+    // A ladder needs its rungs ordered by ink, or the picture is noise. Measured
+    // in this face, not inherited from the other one.
+    const ranjanaMeasured = pool
+      .filter((c) => isSupported(c, ranjana))
+      .map((c) => ({ cluster: c, density: measureDensity(c, ranjana) }));
+    const ranjanaRamp = buildRamp(ranjanaMeasured, 10);
+    lines.push(`      Ranjana ramp: ${ranjanaRamp.join(" ")}`);
+    check("the ramp fills every rung it was asked for", ranjanaRamp.length, 10);
+    check("and ends on the blank", ranjanaRamp[ranjanaRamp.length - 1], " ");
+    check("with distinct clusters on the ink rungs",
+      new Set(ranjanaRamp.slice(0, -1)).size, ranjanaRamp.length - 1);
+    check("every rung is a letter the face actually covers",
+      ranjanaRamp.slice(0, -1).every((c) => isSupported(c, ranjana)), true);
+
+    /**
+     * The pixel-size ladder saves one file per size, and skips a size whose
+     * working grid repeats the one before it. That skip is only safe if
+     * `workingGrid` agrees with what the renderer actually draws: too eager and
+     * it drops a size that really did differ, too shy and it writes duplicates.
+     * On a modest photo 31 of 64 sizes are repeats, so this is most of them.
+     */
+    /**
+     * A source's own transparency has to survive the render.
+     *
+     * A clear pixel arrives from `getImageData` with RGB 0, so it used to read
+     * as pure black: a logo on a transparent background came back sitting on a
+     * solid black field, and error diffusion bled that black into the edges of
+     * the picture itself. Compositing onto paper first fixes the tone; cutting
+     * the alpha back out at the end fixes the transparency. Both halves are
+     * checked, because either alone still looks wrong.
+     */
+    stage("source transparency");
+    const alphaSrc = document.createElement("canvas");
+    alphaSrc.width = SW;
+    alphaSrc.height = SH;
+    {
+      const actx = alphaSrc.getContext("2d", { willReadFrequently: true });
+      actx.clearRect(0, 0, SW, SH);
+      actx.fillStyle = "#8a8a8a";
+      actx.beginPath();
+      actx.arc(SW / 2, SH / 2, SH * 0.3, 0, Math.PI * 2);
+      actx.fill();
+    }
+    // The same picture on an opaque white page, for comparison.
+    const opaqueSrc = document.createElement("canvas");
+    opaqueSrc.width = SW;
+    opaqueSrc.height = SH;
+    {
+      const octx = opaqueSrc.getContext("2d", { willReadFrequently: true });
+      octx.fillStyle = "#ffffff";
+      octx.fillRect(0, 0, SW, SH);
+      octx.drawImage(alphaSrc, 0, 0);
+    }
+
+    const renderAlpha = async (src) => {
+      const ap = new StaticParams();
+      ap.update({ algorithm: "floyd-steinberg", pixelSize: 2 });
+      const out = document.createElement("canvas");
+      cpu.render(await createImageBitmap(src), ap.resolve(0), emptyText, out);
+      return out.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, out.width, out.height).data;
+    };
+    const withAlpha = await renderAlpha(alphaSrc);
+    const onWhite = await renderAlpha(opaqueSrc);
+
+    const cornerAt = (d) => `${d[0]},${d[1]},${d[2]} a${d[3]}`;
+    const middle = (d) => {
+      const i = ((SH >> 1) * SW + (SW >> 1)) * 4;
+      return d[i + 3];
+    };
+    lines.push(`      transparent corner renders as ${cornerAt(withAlpha)}`);
+    check("a clear pixel stays clear", withAlpha[3], 0);
+    check("and the opaque subject stays opaque", middle(withAlpha), 255);
+
+    /**
+     * The tone inside the subject must not have been dragged dark by error
+     * diffused out of the transparent surround.
+     *
+     * Compared as mean ink, not pixel for pixel: error diffusion amplifies any
+     * single-pixel difference across the whole picture, and the two sources do
+     * differ by a hair at the antialiased rim — white composited before the
+     * downsample against white composited after it. What matters is that the
+     * subject is not *darker*, which is what a black surround would do.
+     */
+    // The *same* region in both, chosen by where the transparent render kept
+    // its pixels. Averaging the opaque render over the whole frame would be
+    // averaging the disc against its white surround, which says nothing.
+    const meanInk = (d) => {
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (withAlpha[i + 3] === 0) continue;
+        sum += d[i];
+        n++;
+      }
+      return sum / Math.max(1, n);
+    };
+    const alphaInk = meanInk(withAlpha);
+    const whiteInk = meanInk(onWhite);
+    lines.push(`      subject mean tone: on transparency ${alphaInk.toFixed(1)}, on white ${whiteInk.toFixed(1)}`);
+    check("and the transparent surround does not darken it",
+      Math.abs(alphaInk - whiteInk) < 8, true);
+
+    stage("pixel-size ladder");
+    const { workingGrid } = await import("/src/render/image.ts");
+    const ladderShots = new Map();
+    let sameGridDiffered = [];
+    let diffGridMatched = [];
+    let previousGrid = null;
+    let previousHash = null;
+    for (let size = 1; size <= 64; size++) {
+      const lp = new StaticParams();
+      lp.update({ algorithm: "bayer", pixelSize: size });
+      const resolved = lp.resolve(0);
+      const grid = workingGrid(SW, SH, resolved);
+      const key = `${grid.w}x${grid.h}`;
+
+      const out = document.createElement("canvas");
+      cpu.render(bitmap, resolved, emptyText, out);
+      const data = out.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, out.width, out.height).data;
+      // A cheap content fingerprint; exactness is what matters, not the hash.
+      let hash = 2166136261;
+      for (let i = 0; i < data.length; i += 4) {
+        hash ^= data[i];
+        hash = Math.imul(hash, 16777619);
+      }
+      hash = hash >>> 0;
+
+      if (previousGrid !== null) {
+        if (key === previousGrid && hash !== previousHash) sameGridDiffered.push(size);
+        if (key !== previousGrid && hash === previousHash) diffGridMatched.push(size);
+      }
+      previousGrid = key;
+      previousHash = hash;
+      ladderShots.set(key, hash);
+    }
+    lines.push(`      64 pixel sizes produce ${ladderShots.size} distinct working grids`);
+    check("a repeated working grid really does render identically", sameGridDiffered, []);
+    check("and a changed grid really does render differently", diffGridMatched, []);
+    check("the ladder is worth deduplicating at all", ladderShots.size < 64, true);
+
+    // --- palettes ---
+    //
+    // The claim is a *lookup*, not a blend: a palette-mode render may contain
+    // the strip's own swatches and nothing else. Anything else means the mode
+    // fell through to another painter, which is exactly what happened when the
+    // dispatch was first wired and the output came back plain greyscale.
+    stage("palettes");
+    const { BUILT_IN_PALETTES } = await import("/src/core/palette.ts");
+    const strayColours = [];
+    for (let i = 0; i < BUILT_IN_PALETTES.length; i++) {
+      const strip = BUILT_IN_PALETTES[i];
+      const pp = new StaticParams();
+      pp.update({
+        algorithm: "blue-noise", pixelSize: 2, outputMode: "palette",
+        paletteIndex: i, levels: strip.swatches.length,
+      });
+      const out = document.createElement("canvas");
+      cpu.render(bitmap, pp.resolve(0), emptyText, out);
+      const d = out.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, out.width, out.height).data;
+      const allowed = new Set(strip.swatches.map((sw) => `${sw.r},${sw.g},${sw.b}`));
+      const found = new Set();
+      for (let q = 0; q < d.length; q += 4) found.add(`${d[q]},${d[q + 1]},${d[q + 2]}`);
+      for (const colour of found) if (!allowed.has(colour)) strayColours.push(`${strip.name}:${colour}`);
+    }
+    check("a palette render contains only its own swatches", strayColours, []);
+
+    // --- temporal smoothing ---
+    //
+    // Two frames of a moving source, dithered with error diffusion — the kernel
+    // that actually crawls. Smoothing must pull the second frame's *pre-dither*
+    // luminance toward the first, so the rendered pair ends up more alike than
+    // it was. It also has to work on a pipeline that has already dithered once,
+    // because error diffusion destroys the buffer the value is taken from: a
+    // copy recovered after the pass would be the diffused field, not luminance.
+    stage("temporal smoothing");
+    const smoothFrame = (i) => {
+      const c = document.createElement("canvas");
+      c.width = SW;
+      c.height = SH;
+      const g = c.getContext("2d", { willReadFrequently: true });
+      g.fillStyle = "#202020";
+      g.fillRect(0, 0, SW, SH);
+      g.fillStyle = "#e0e0e0";
+      g.fillRect(10 + i * 14, 20, 44, 50);
+      return createImageBitmap(c);
+    };
+    const [frameA, frameB] = [await smoothFrame(0), await smoothFrame(1)];
+
+    const renderPair = async (smoothing) => {
+      // A fresh pipeline per run: the previous frame is pipeline state, and
+      // sharing one would carry the other run's history into this one.
+      const seq = new StillPipeline(maskBytes);
+      const sp = new StaticParams();
+      sp.update({ algorithm: "floyd-steinberg", pixelSize: 2, temporalSmoothing: smoothing });
+      const out = document.createElement("canvas");
+      seq.render(frameA, sp.resolve(0), emptyText, out);
+      const first = Uint8ClampedArray.from(
+        out.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, out.width, out.height).data,
+      );
+      seq.render(frameB, sp.resolve(1 / 30), emptyText, out);
+      const second = out
+        .getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, out.width, out.height).data;
+      let differing = 0;
+      for (let i = 0; i < second.length; i += 4) if (first[i] !== second[i]) differing++;
+      return differing / (out.width * out.height);
+    };
+
+    const churnOff = await renderPair(0);
+    const churnOn = await renderPair(0.9);
+    lines.push(`      frame-to-frame change: smoothing off ${(churnOff * 100).toFixed(1)}%, on ${(churnOn * 100).toFixed(1)}%`);
+    check("smoothing reduces how much the picture changes between frames",
+      churnOn < churnOff, true);
+    check("and does not simply freeze it", churnOn > 0, true);
+
+    // --- pointer effects ---
+    //
+    // Stills only, so there is no GPU twin and no parity to check. What does
+    // need checking is that each one reaches inside its radius and that the
+    // lens family leaves everything outside it exactly alone — a displacement
+    // that leaked past its falloff would drag the whole picture.
+    stage("pointer effects");
+    const { HOVER_IDS, displaces } = await import("/src/core/hover.ts");
+    const hoverSrc = document.createElement("canvas");
+    hoverSrc.width = SW;
+    hoverSrc.height = SH;
+    {
+      // Structure a lens can bend and edges Neon can find. A flat field would
+      // make every one of these look identical and pass regardless.
+      const hctx = hoverSrc.getContext("2d", { willReadFrequently: true });
+      const hg = hctx.createLinearGradient(0, 0, SW, SH);
+      hg.addColorStop(0, "#303030");
+      hg.addColorStop(1, "#d0d0d0");
+      hctx.fillStyle = hg;
+      hctx.fillRect(0, 0, SW, SH);
+      // Pitched against what is being measured. A displacement only shows
+      // where there is detail to displace, and the lens family shifts a few
+      // working-grid cells — so a coarse checker would let a real displacement
+      // land back on the same value and read as an inert effect.
+      hctx.fillStyle = "#f8f8f8";
+      for (let y = 0; y < SH; y += 6) for (let x = 0; x < SW; x += 6) hctx.fillRect(x, y, 3, 3);
+    }
+    const hoverBitmap = await createImageBitmap(hoverSrc);
+    const HOVER_R = 0.35;
+
+    const renderHover = (id) => {
+      const hp = new StaticParams();
+      hp.update({
+        algorithm: "bayer", pixelSize: 2, levels: 2,
+        hover: id, hoverRadius: HOVER_R, hoverStrength: 0.9, pointerU: 0.5, pointerV: 0.5,
+      });
+      const out = document.createElement("canvas");
+      cpu.render(hoverBitmap, hp.resolve(0), emptyText, out);
+      return out.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, out.width, out.height).data;
+    };
+
+    const hoverPlain = renderHover("none");
+    const inert = [];
+    const leaked = [];
+    for (const id of HOVER_IDS.filter((h) => h !== "none")) {
+      const painted = renderHover(id);
+      let inside = 0;
+      let outside = 0;
+      for (let y = 0; y < SH; y++) {
+        for (let x = 0; x < SW; x++) {
+          const i = (y * SW + x) * 4;
+          if (painted[i] === hoverPlain[i]) continue;
+          const du = (x / SW - 0.5) * (SW / SH);
+          const dv = y / SH - 0.5;
+          if (Math.hypot(du, dv) < HOVER_R) inside++;
+          else outside++;
+        }
+      }
+      // 2% of the disc: enough to rule out an effect that technically runs and
+      // is invisible, which is what Ice was before its lattice was coarsened.
+      if (inside < SW * SH * 0.02) inert.push(id);
+      if (displaces(id) && outside > 0) leaked.push(id);
+    }
+    check("every pointer effect visibly changes the picture", inert, []);
+    check("and no lens reaches outside its own radius", leaked, []);
+
+    // --- animation fields, CPU against GPU ---
+    //
+    // The Bayer table is generated from its TS source, so those two paths
+    // cannot drift. These eight are hand-transcribed GLSL twins of
+    // core/motion.ts and absolutely can, silently, in a way no unit test
+    // reaches — the TS side would keep passing on its own. So every mode is
+    // rendered through both paths and compared.
+    stage("animation fields");
+    const { MOTION_IDS } = await import("/src/core/motion.ts");
+    const motionSrc = document.createElement("canvas");
+    motionSrc.width = SW;
+    motionSrc.height = SH;
+    {
+      // Flat mid grey: the field is then the only thing shaping the picture, so
+      // a mode that quietly does nothing shows up instead of hiding under the
+      // source image's own detail.
+      const mctx = motionSrc.getContext("2d", { willReadFrequently: true });
+      mctx.fillStyle = "#808080";
+      mctx.fillRect(0, 0, SW, SH);
+    }
+    const motionBitmap = await createImageBitmap(motionSrc);
+    const MOTION_T = 1.7;
+    let motionWorst = 0;
+    let motionStatic = [];
+    for (const id of MOTION_IDS) {
+      const mp = new StaticParams();
+      mp.update({ algorithm: "bayer", pixelSize: 2, levels: 2, motion: id, motionAmount: 0.9 });
+      const resolved = mp.resolve(MOTION_T);
+
+      const mCanvas = document.createElement("canvas");
+      cpu.render(motionBitmap, resolved, emptyText, mCanvas, 1, MOTION_T);
+      const cpuPixels = mCanvas
+        .getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, mCanvas.width, mCanvas.height).data;
+
+      gpu.render(motionSrc, SW, SH, resolved, undefined, MOTION_T);
+      const gpuPixels = gpu.pixels(SW, SH);
+
+      let differing = 0;
+      for (let i = 0; i < gpuPixels.length; i += 4) {
+        if (Math.abs(cpuPixels[i] - gpuPixels[i]) > 8) differing++;
+      }
+      motionWorst = Math.max(motionWorst, differing / (SW * SH));
+
+      // A field that renders the same picture at two instants is not animating,
+      // which an ink-coverage check would happily call a pass.
+      if (id !== "none") {
+        const later = new StaticParams();
+        later.update({ algorithm: "bayer", pixelSize: 2, levels: 2, motion: id, motionAmount: 0.9 });
+        gpu.render(motionSrc, SW, SH, later.resolve(MOTION_T + 0.9), undefined, MOTION_T + 0.9);
+        const moved = gpu.pixels(SW, SH);
+        let changed = 0;
+        for (let i = 0; i < moved.length; i += 4) if (moved[i] !== gpuPixels[i]) changed++;
+        if (changed === 0) motionStatic.push(id);
+      }
+    }
+    lines.push(`      worst CPU/GPU disagreement across ${MOTION_IDS.length} modes: ${(motionWorst * 100).toFixed(2)}%`);
+    check("every animation field matches between the two paths", motionWorst < 0.01, true);
+    check("and every one of them actually animates", motionStatic, []);
+
+    // --- colour halftone: per-channel rotated screens ---
+    // Three claims, and only the third is obvious from a screenshot: the inks
+    // are screened per channel, the user's angle turns the whole rosette, and a
+    // *neutral* source still comes out neutral. That last one is what catches a
+    // channel-to-ink mix-up — swap two inks and saturated regions still look
+    // plausibly colourful while grey picks up a cast.
+    stage("colour halftone");
+    const htSrc = document.createElement("canvas");
+    htSrc.width = 96;
+    htSrc.height = 64;
+    {
+      const hctx = htSrc.getContext("2d", { willReadFrequently: true });
+      hctx.fillStyle = "#d02828";
+      hctx.fillRect(0, 0, 48, 64);
+      // Mid grey, well away from both ends so every ink has room to move.
+      hctx.fillStyle = "#808080";
+      hctx.fillRect(48, 0, 48, 64);
+    }
+    const htBitmap = await createImageBitmap(htSrc);
+    const htEmpty = new StaticText([]);
+    const htOut = document.createElement("canvas");
+
+    const htRender = (patch) => {
+      const p = new StaticParams();
+      p.update({ algorithm: "halftone", halftoneCell: 6, ...patch });
+      cpu.render(htBitmap, p.resolve(0), htEmpty, htOut);
+      return htOut.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, htOut.width, htOut.height).data;
+    };
+    const htBalance = (data, x0, x1) => {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = 0; y < htOut.height; y++) {
+        for (let x = x0; x < x1; x++) {
+          const p = (y * htOut.width + x) * 4;
+          r += data[p]; g += data[p + 1]; b += data[p + 2]; n++;
+        }
+      }
+      return { r: r / n, g: g / n, b: b / n };
+    };
+
+    const htMono = htRender({ outputMode: "mono" });
+    const htColor = htRender({ outputMode: "color" });
+    const halfW = Math.floor(htOut.width / 2);
+    const monoRed = htBalance(htMono, 2, halfW - 2);
+    const colorRed = htBalance(htColor, 2, halfW - 2);
+    const colorGrey = htBalance(htColor, halfW + 2, htOut.width - 2);
+    lines.push(
+      `      halftone red: mono ${monoRed.r.toFixed(0)}/${monoRed.g.toFixed(0)}/${monoRed.b.toFixed(0)}` +
+      `, colour ${colorRed.r.toFixed(0)}/${colorRed.g.toFixed(0)}/${colorRed.b.toFixed(0)}` +
+      `; colour grey ${colorGrey.r.toFixed(0)}/${colorGrey.g.toFixed(0)}/${colorGrey.b.toFixed(0)}`,
+    );
+    check("halftone in mono is neutral everywhere",
+      Math.abs(monoRed.r - monoRed.g) < 2 && Math.abs(monoRed.g - monoRed.b) < 2, true);
+    check("colour halftone screens the channels apart",
+      colorRed.r > colorRed.g + 25 && colorRed.r > colorRed.b + 25, true);
+    check("and a neutral source stays neutral",
+      Math.abs(colorGrey.r - colorGrey.g) < 6 && Math.abs(colorGrey.g - colorGrey.b) < 6, true);
+
+    // Duo borrows nothing here: halftone owns its ink pair, so the picture is
+    // the same one mono draws. The UI says as much, and this is that claim.
+    const htDuo = htRender({
+      outputMode: "duo", duoDark: { r: 0, g: 90, b: 30 }, duoLight: { r: 255, g: 240, b: 200 },
+    });
+    let duoSame = true;
+    for (let i = 0; i < htDuo.length; i++) if (htDuo[i] !== htMono[i]) { duoSame = false; break; }
+    check("halftone duo draws the same picture as mono", duoSame, true);
+
+    // The angle control must turn the rosette rather than going dead now that
+    // three screens carry their own offsets from it.
+    const htTurned = htRender({ outputMode: "color", halftoneAngle: 20 });
+    let moved = 0;
+    for (let i = 0; i < htTurned.length; i += 4) if (htTurned[i] !== htColor[i]) moved++;
+    lines.push(`      angle 0 → 20 moved ${((moved / (htTurned.length / 4)) * 100).toFixed(0)}% of pixels`);
+    check("the angle control turns the whole rosette", moved / (htTurned.length / 4) > 0.1, true);
+
+    // --- braille as a sub-cell dithering primitive ---
+    stage("braille");
+    const { brailleChar, brailleMask, packBraille } = await import("/src/glyph/braille.ts");
+
+    let roundTripped = 0;
+    for (let m = 0; m < 256; m++) if (brailleMask(brailleChar(m)) === m) roundTripped++;
+    check("all 256 masks round-trip through the table", roundTripped, 256);
+
+    /**
+     * The claim is 2×4 sub-samples per cell, not one sample upscaled. A source
+     * with detail finer than a cell must therefore produce cells whose dots
+     * differ *within* the cell — an upscaled 1×1 would only ever emit 0x00 or
+     * 0xFF.
+     */
+    stage("braille sub-grid resolution");
+    const fine = document.createElement("canvas");
+    fine.width = 64;
+    fine.height = 64;
+    const fctx = fine.getContext("2d", { willReadFrequently: true });
+    fctx.fillStyle = "#fff";
+    fctx.fillRect(0, 0, 64, 64);
+    fctx.fillStyle = "#000";
+    // Stripes sized between a cell and a sub-sample. At pixelSize 8 and aspect
+    // 2 a cell is 16px tall over four sub-rows of 4px, so 4px stripes are
+    // resolvable by the sub-grid and average to flat grey for anything
+    // sampling once per cell. Finer stripes than this would be lost in the
+    // downsample and would prove nothing.
+    for (let y = 0; y < 64; y += 8) fctx.fillRect(0, y, 64, 4);
+    const fineBmp = await createImageBitmap(fine);
+
+    const brailleParams = new StaticParams();
+    brailleParams.update({ text: "braille", algorithm: "threshold", pixelSize: 8, cellAspect: 2 });
+    const brailleCanvas = document.createElement("canvas");
+    cpu.render(fineBmp, brailleParams.resolve(0), emptyText, brailleCanvas);
+    const brailleText = cpu.gridAsText();
+    const brailleMasks = [...brailleText.replace(/\n/g, "")].map((ch) => brailleMask(ch));
+    const partial = brailleMasks.filter((m) => m !== 0x00 && m !== 0xff).length;
+    lines.push(`      distinct masks: ${new Set(brailleMasks).size}, partially-filled cells: ${partial}/${brailleMasks.length}`);
+    // Every cell partially filled *is* the proof: sampling once per cell can
+    // only ever yield 0x00 or 0xFF. That all cells agree is correct here — the
+    // stripes are periodic and aligned to the grid.
+    check("cells resolve detail finer than themselves", partial, brailleMasks.length);
+
+    // And the exact pattern, which pins the column-major bit order too: 4px
+    // stripes over 4px sub-rows light rows 0 and 2 in both columns.
+    const expected = 0x01 | 0x04 | 0x08 | 0x20;
+    check("with the sub-grid mapped through the bit table correctly",
+      brailleMasks[0], expected);
+
+    // Copy-as-text emits real braille codepoints for the same image.
+    check("copy-as-text emits U+2800 codepoints",
+      brailleText.codePointAt(0) >= 0x2800 && brailleText.codePointAt(0) <= 0x28ff, true);
+
+    /**
+     * Error diffusion must run across the whole sub-grid. Confined per cell it
+     * would push its error into the cell's own edge every time, and a smooth
+     * gradient would band on the cell lattice.
+     */
+    stage("braille error diffusion crosses cells");
+    const rampCanvas = document.createElement("canvas");
+    rampCanvas.width = 128;
+    rampCanvas.height = 64;
+    const rctx = rampCanvas.getContext("2d", { willReadFrequently: true });
+    const rgrad = rctx.createLinearGradient(0, 0, 128, 0);
+    rgrad.addColorStop(0, "#000");
+    rgrad.addColorStop(1, "#fff");
+    rctx.fillStyle = rgrad;
+    rctx.fillRect(0, 0, 128, 64);
+    const rampBmp = await createImageBitmap(rampCanvas);
+
+    const diffused = new StaticParams();
+    diffused.update({ text: "braille", algorithm: "floyd-steinberg", pixelSize: 8, cellAspect: 2 });
+    const diffCanvas = document.createElement("canvas");
+    cpu.render(rampBmp, diffused.resolve(0), emptyText, diffCanvas);
+    const diffMasks = [...cpu.gridAsText().replace(/\n/g, "")].map((ch) => brailleMask(ch));
+    // Banding would make every cell in a column identical and the column's
+    // masks repeat; genuine cross-cell diffusion breaks that regularity.
+    const columnUniform = new Set(diffMasks).size;
+    lines.push(`      diffused gradient produced ${columnUniform} distinct masks`);
+    check("a gradient does not collapse to a few cell-aligned patterns",
+      columnUniform > 12, true);
+
+    // The controls that genuinely do nothing here disable and say why.
+    stage("braille control interactions");
+    // A fresh frame: the earlier one was removed after its own checks.
+    const bframe = document.createElement("iframe");
+    bframe.src = "/";
+    bframe.style.cssText = "width:400px;height:520px;border:1px solid #000";
+    document.body.append(bframe);
+    await new Promise((resolve) => bframe.addEventListener("load", resolve));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const bdoc = bframe.contentDocument;
+    const bfire = (id, value) => {
+      const el = bdoc.getElementById(id);
+      el.value = value;
+      el.dispatchEvent(new bframe.contentWindow.Event("change", { bubbles: true }));
+    };
+
+    bfire("text", "braille");
+    check("braille disables levels",
+      bdoc.querySelector('[data-disable="levelsInert"] input').disabled, true);
+    check("and shows why",
+      bdoc.querySelector('[data-i18n="reason.brailleLevels"]').hidden, false);
+    check("braille disables Color",
+      bdoc.querySelector('#outputMode option[value="color"]').disabled, true);
+    check("and shows why too",
+      bdoc.querySelector('[data-i18n="reason.brailleColor"]').hidden, false);
+    check("mono and duo stay available",
+      [bdoc.querySelector('#outputMode option[value="mono"]').disabled,
+       bdoc.querySelector('#outputMode option[value="duo"]').disabled], [false, false]);
+    check("the dot controls appear", bdoc.querySelector('[data-when="braille"]').hidden, false);
+
+    // The cell ratio follows the mode through the same path the font uses.
+    check("braille takes a 2.0 cell ratio", Number(bdoc.getElementById("cellAspect").value), 2);
+    bfire("text", "ramp");
+    check("and hands it back to the face's ratio on leaving",
+      Number(bdoc.getElementById("cellAspect").value), 1.35);
+
+    // A hand-set ratio is not overwritten by either default.
+    const aspect = bdoc.getElementById("cellAspect");
+    aspect.value = "1.7";
+    aspect.dispatchEvent(new bframe.contentWindow.Event("input", { bubbles: true }));
+    bfire("text", "braille");
+    check("but a ratio the user set by hand stands", Number(aspect.value), 1.7);
+
+    // Braille displaces a Color selection; leaving braille must give it back.
+    // Forcing a choice and then keeping it is how a user concludes the feature
+    // vanished — which is exactly how this was found.
+    bfire("text", "ramp");
+    bfire("outputMode", "color");
+    check("Color is selectable in density mode", bdoc.getElementById("outputMode").value, "color");
+    bfire("text", "braille");
+    check("braille displaces it", bdoc.getElementById("outputMode").value, "mono");
+    bfire("text", "ramp");
+    check("and leaving braille hands it back", bdoc.getElementById("outputMode").value, "color");
+
+    // A deliberate choice made while in braille is not overwritten.
+    bfire("text", "braille");
+    bfire("outputMode", "duo");
+    bfire("text", "ramp");
+    check("but a choice made under the constraint stands",
+      bdoc.getElementById("outputMode").value, "duo");
+
+    // Halftone: the mode select stays live because Color does something, but
+    // the duo pickers hide — the pair on offer under halftone is its own, and
+    // showing two ink pairs at once is how a user picks the one that is
+    // ignored. `levels` still disables, since dot area carries the tone.
+    bfire("text", "off");
+    bfire("algorithm", "halftone");
+    check("halftone leaves the mode select live",
+      [bdoc.querySelector('#outputMode option[value="mono"]').disabled,
+       bdoc.querySelector('#outputMode option[value="duo"]').disabled,
+       bdoc.querySelector('#outputMode option[value="color"]').disabled], [false, false, false]);
+    check("and explains what the modes mean here",
+      bdoc.querySelector('[data-i18n="reason.halftoneMode"]').hidden, false);
+    check("halftone still disables levels",
+      bdoc.querySelector('[data-disable="levelsInert"] input').disabled, true);
+    bfire("outputMode", "duo");
+    check("the duo pickers stay hidden under halftone",
+      bdoc.querySelector('[data-when="inkPair"]').hidden, true);
+    check("halftone shows its own ink pair instead",
+      bdoc.querySelector('[data-when="halftone"]').hidden, false);
+    bfire("algorithm", "bayer");
+    check("and duo gets its pickers back on leaving halftone",
+      bdoc.querySelector('[data-when="inkPair"]').hidden, false);
+
+    bframe.remove();
+
+    // A link has to restore what it carried. The unit tests cover the format;
+    // this covers the wiring — that the controls are written back on load, and
+    // that a clean load leaves the address bar clean instead of listing every
+    // default and making an unshareable link.
+    //
+    // Its own frame, deliberately: the one above has been driven through every
+    // check on this page, so "clean" would be measuring that history instead.
+    stage("layout and URL state");
+    const openFrame = async (src, size = "width:400px;height:520px") => {
+      const frame = document.createElement("iframe");
+      frame.src = src;
+      frame.style.cssText = `${size};border:1px solid #000`;
+      document.body.append(frame);
+      await new Promise((resolve) => frame.addEventListener("load", resolve));
+      // Long enough for the font gate: the settings from a link are applied
+      // after it, and a shorter wait measures the app mid-startup.
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      return frame;
+    };
+
+    /**
+     * The rail must be its own scroller, not the page's.
+     *
+     * Grid items default to `min-height: auto`, so a rail taller than the
+     * viewport stretches its row instead of scrolling — and the stage, sharing
+     * that row, grows with it and centres the picture below the fold. Reaching
+     * for the algorithm then scrolled the video off screen, which is exactly
+     * what was reported. Asserted on the numbers, because the CSS that fixes it
+     * is two easily-deleted lines.
+     */
+    // Wide enough to be past the 700px breakpoint: below it the layout is one
+    // page scroller by design, and measuring that proves nothing about the
+    // two-column case this check exists for.
+    const lframe = await openFrame("/", "width:900px;height:600px");
+    const lrail = lframe.contentDocument.getElementById("rail");
+    const lstage = lframe.contentDocument.getElementById("stage");
+    const viewport = lframe.contentWindow.innerHeight;
+    lines.push(
+      `      rail ${lrail.clientHeight}/${lrail.scrollHeight}, stage ${lstage.clientHeight}, viewport ${viewport}`,
+    );
+    check("the rail is taller than the viewport, as it should be",
+      lrail.scrollHeight > lrail.clientHeight, true);
+    check("but scrolls itself rather than the page",
+      lrail.clientHeight <= viewport + 1, true);
+    check("so the stage stays viewport height and keeps the picture in view",
+      lstage.clientHeight <= viewport + 1, true);
+
+    /**
+     * A tall picture must not push the playback controls out of reach.
+     *
+     * The stage is a fixed-height pane that does not scroll, so anything the
+     * canvas displaces is simply gone. Capping the canvas at the viewport was
+     * not enough — it left no room for the play button and the timeline beneath
+     * it. The picture now takes whatever height those do not need.
+     *
+     * Driven by giving the canvas a very tall bitmap rather than loading a
+     * video, because the CSS contract is what is under test.
+     */
+    const tall = lframe.contentDocument;
+    tall.getElementById("out").hidden = false;
+    tall.getElementById("frame").hidden = false;
+    tall.getElementById("play").hidden = false;
+    tall.getElementById("timeline").hidden = false;
+    tall.getElementById("out").width = 300;
+    tall.getElementById("out").height = 4000;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const lstage2 = tall.getElementById("stage");
+    const playBox = tall.getElementById("play").getBoundingClientRect();
+    const stageBox = lstage2.getBoundingClientRect();
+    lines.push(
+      `      tall picture: stage ${lstage2.clientHeight}/${lstage2.scrollHeight},` +
+      ` play at ${Math.round(playBox.top)}–${Math.round(playBox.bottom)} of ${Math.round(stageBox.bottom)}`,
+    );
+    check("a very tall picture does not overflow the stage",
+      lstage2.scrollHeight <= lstage2.clientHeight + 1, true);
+    check("and the play button stays inside it",
+      playBox.bottom <= stageBox.bottom + 1 && playBox.top >= stageBox.top - 1, true);
+    lframe.remove();
+
+    const uframe = await openFrame("/");
+    check("a clean load writes nothing to the address bar",
+      uframe.contentWindow.location.hash, "");
+    const ufire = (id, value) => {
+      const el = uframe.contentDocument.getElementById(id);
+      el.value = value;
+      el.dispatchEvent(new uframe.contentWindow.Event("change", { bubbles: true }));
+    };
+    ufire("algorithm", "bayer");
+    ufire("outputMode", "duo");
+    const carried = uframe.contentWindow.location.hash;
+    lines.push(`      link carries ${carried}`);
+    check("edits reach the address bar", carried.includes("algorithm=bayer"), true);
+    uframe.remove();
+
+    const rframe = await openFrame(`/${carried}`);
+    check("and the link survives in the bar rather than vanishing",
+      rframe.contentWindow.location.hash.includes("algorithm=bayer"), true);
+    const restored = [
+      rframe.contentDocument.getElementById("algorithm").value,
+      rframe.contentDocument.getElementById("outputMode").value,
+    ];
+    lines.push(`      fresh load restored ${JSON.stringify(restored)}`);
+    check("and a fresh load restores them", restored, ["bayer", "duo"]);
+    rframe.remove();
+
+    /**
+     * Play and pause, driven through the real app with a real file.
+     *
+     * `playing` used to be a flag the button set and nothing ever corrected, so
+     * an element that stopped on its own — a decode hiccup, a seek, the browser
+     * reclaiming a codec — left the button reading "pause" over a frozen
+     * picture, and the next click paused an already-paused element. Two clicks
+     * to get anything, which is what "play/pause does not work" looks like.
+     */
+    /**
+     * A picture smaller than the stage has to scale up to fill it.
+     *
+     * `max-width`/`max-height` only ever shrink, so a small photo was drawn at
+     * its own pixel size in the middle of a large empty pane — which reads as
+     * the app padding a background around it. The fit is computed, so the check
+     * is that one axis is filled and the proportions are untouched.
+     */
+    stage("the picture fills the stage");
+    {
+      const fitFrame = await openFrame("/", "width:900px;height:600px");
+      const fdoc = fitFrame.contentDocument;
+      const tiny = document.createElement("canvas");
+      tiny.width = 80;
+      tiny.height = 60;
+      const tctx = tiny.getContext("2d", { willReadFrequently: true });
+      tctx.fillStyle = "#808080";
+      tctx.fillRect(0, 0, 80, 60);
+      const blob = await new Promise((resolve) => tiny.toBlob(resolve, "image/png"));
+      const dt = new fitFrame.contentWindow.DataTransfer();
+      dt.items.add(new fitFrame.contentWindow.File([blob], "tiny.png", { type: "image/png" }));
+      const input = fdoc.getElementById("file");
+      input.files = dt.files;
+      input.dispatchEvent(new fitFrame.contentWindow.Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 1800));
+
+      const shown = fdoc.getElementById("out").getBoundingClientRect();
+      const holder = fdoc.getElementById("frame").getBoundingClientRect();
+      const fills = Math.max(shown.width / holder.width, shown.height / holder.height);
+      const ratio = shown.width / shown.height;
+      lines.push(`      an 80x60 picture shows at ${Math.round(shown.width)}x${Math.round(shown.height)} in a ${Math.round(holder.width)}x${Math.round(holder.height)} frame`);
+      check("a small picture is scaled up to meet the frame", fills > 0.95, true);
+      check("without being stretched", Math.abs(ratio - 80 / 60) < 0.05, true);
+      check("and without overflowing it",
+        shown.width <= holder.width + 1 && shown.height <= holder.height + 1, true);
+      fitFrame.remove();
+    }
+
+    stage("play and pause");
+    const pframe = await openFrame("/", "width:900px;height:600px");
+    const pdoc = pframe.contentDocument;
+    {
+      const bytes = new Uint8Array(await fixture.arrayBuffer());
+      const dt = new pframe.contentWindow.DataTransfer();
+      dt.items.add(new pframe.contentWindow.File([bytes], "clip.mp4", { type: "video/mp4" }));
+      const input = pdoc.getElementById("file");
+      input.files = dt.files;
+      input.dispatchEvent(new pframe.contentWindow.Event("change", { bubbles: true }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+
+    /**
+     * The still preview of a video is its first frame, and it has to be the
+     * real one.
+     *
+     * `loadeddata` means a frame is *decodable*, not that one has been painted,
+     * so capturing there returned an opaque black bitmap: the picture came up
+     * black — with whatever part of the frame had arrived showing as a band of
+     * real image against it — and only corrected itself once play was pressed.
+     * The fixture is a mid-grey field, so a correct first frame dithers to
+     * something around half ink and a black one is unmistakable.
+     */
+    {
+      const shown = pdoc.getElementById("out");
+      const sd = shown.getContext("2d", { willReadFrequently: true })
+        .getImageData(0, 0, shown.width, shown.height).data;
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < sd.length; i += 4) {
+        sum += sd[i];
+        n++;
+      }
+      const mean = sum / Math.max(1, n);
+      lines.push(`      the first frame previews at mean ${mean.toFixed(0)} before play is pressed`);
+      check("a video's first frame previews as the picture, not as black",
+        mean > 40, true);
+    }
+
+    const playBtn = pdoc.getElementById("play");
+    const scrubBar = pdoc.getElementById("scrub");
+    const label = () => playBtn.textContent.trim();
+    const idleLabel = label();
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const playingLabel = label();
+    const movedTo = Number(scrubBar.value);
+    check("playing advances the clip", movedTo > 0, true);
+    check("and the button offers to pause", playingLabel !== idleLabel, true);
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const heldAt = Number(scrubBar.value);
+    check("pausing puts the button back", label(), idleLabel);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    check("and the clip actually stops", Number(scrubBar.value), heldAt);
+
+    /**
+     * The element stopping without the button is the case the flag used to get
+     * wrong. Scrubbing does exactly that, so it is the honest way to reach it.
+     */
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    scrubBar.value = "200";
+    scrubBar.dispatchEvent(new pframe.contentWindow.Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    check("a stop the button did not cause still updates the button", label(), idleLabel);
+
+    /**
+     * The video controls have to be reachable without hunting for them.
+     *
+     * They used to sit at the bottom of the Export group, under the still-image
+     * exports; once the pixel-size ladder was added they were a screen and a
+     * half down the rail, which reads as the button having gone missing. They
+     * are their own group now, near the top, and shown only for a video.
+     */
+    {
+      const railEl = pdoc.getElementById("rail");
+      const btn = pdoc.getElementById("exportVideo");
+      const box = btn.getBoundingClientRect();
+      const railBox = railEl.getBoundingClientRect();
+      lines.push(`      video export sits at ${Math.round(box.top - railBox.top)}px into a ${Math.round(railBox.height)}px rail`);
+      check("the video export is in view without scrolling the rail",
+        box.top >= railBox.top - 1 && box.bottom <= railBox.bottom + 1, true);
+      check("and it is hidden when the file is not a video",
+        pdoc.getElementById("exportVideo").closest("details").hidden, false);
+    }
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    lines.push(`      after one click from a stopped state: ${label()}, scrub ${scrubBar.value}`);
+    check("and one click resumes rather than two",
+      label() !== idleLabel && Number(scrubBar.value) > 200, true);
+    pframe.remove();
+
+    const report = document.getElementById("report");
+    report.textContent = `${failed === 0 ? "all checks passed" : `${failed} FAILED`}\n\n${lines.filter((l) => !l.startsWith("....")).join("\n")}`;
+    if (failed > 0) report.className = "fail";
+    document.title = failed === 0 ? "ready" : "FAILED";
+  </script>
+</body>

@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dhaka</title>
+    <style>
+      /* Bundled, never a CDN: the tool works offline and glyph density must
+         measure the same face on every machine. `block` rather than `swap` so
+         nothing is ever measured against a fallback mid-swap. */
+      @font-face {
+        font-family: "Noto Sans Devanagari";
+        src: url("./fonts/noto-sans-devanagari-var.woff2") format("woff2");
+        font-weight: 400 700;
+        font-display: block;
+      }
+      @font-face {
+        font-family: "Nithya Ranjana";
+        src: url("./fonts/nithya-ranjana-du.otf") format("opentype");
+        font-weight: 400;
+        font-display: block;
+      }
+      @font-face {
+        font-family: "IBM Plex Mono";
+        src: url("./fonts/ibm-plex-mono-400.woff2") format("woff2");
+        font-weight: 400;
+        font-display: block;
+      }
+      @font-face {
+        font-family: "IBM Plex Mono";
+        src: url("./fonts/ibm-plex-mono-700.woff2") format("woff2");
+        font-weight: 700;
+        font-display: block;
+      }
+      /* A phosphor terminal: hard edges and no gradients, as before, but struck
+         in green on a dark tube instead of ink on paper. The hard edges are the
+         part that was never decorative — they are what the tool makes.
+
+         Everything is a token, so the whole scheme is four values. `color-scheme`
+         is not cosmetic: without it the native select popup, the range track and
+         the colour picker all render as light-mode widgets on a dark rail. */
+      :root {
+        color-scheme: dark;
+        --ink: #4af08a;
+        --paper: #0b0f0c;
+        /* Struck back towards the tube, for surfaces that must read as inert
+           without going invisible. */
+        --dim: #16241b;
+        --rule: 2px solid var(--ink);
+        --bloom: 0 0 6px rgb(74 240 138 / 0.45);
+        /* One scanline every 3px, stationary. Attachment stays `scroll`, which
+           pins the lines to the element rather than to its content — a real
+           tube's raster does not slide when the page does. */
+        --scanlines: repeating-linear-gradient(
+          to bottom,
+          rgb(0 0 0 / 0.28) 0 1px,
+          transparent 1px 3px
+        );
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        /* Fixed, not `min-height`: the two panes scroll on their own. Under one
+           page scroller the canvas sat centred in a cell as tall as the rail, so
+           every control group added pushed the picture further down and reaching
+           for the algorithm scrolled the video off screen. */
+        height: 100vh;
+        overflow: hidden;
+      }
+      #rail {
+        /* The raster is on the chrome, never on the stage. A scanline overlay
+           across the picture would change what the user sees without changing
+           what they export, which is the one thing a preview may not do. */
+        background: var(--scanlines);
+        text-shadow: var(--bloom);
+        border-right: var(--rule);
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        /* Grid items default to `min-height: auto`, so a rail taller than the
+           viewport stretches its row instead of scrolling — and the stage,
+           sharing that row, becomes just as tall and centres the picture below
+           the fold. This is what makes the pane itself the scroller. */
+        min-height: 0;
+      }
+      #masthead {
+        display: flex;
+        justify-content: space-between;
+        align-items: start;
+        gap: 12px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0;
+        letter-spacing: -0.02em;
+        text-shadow: var(--bloom);
+      }
+      h1 small {
+        display: block;
+        font-size: 11px;
+        font-weight: 400;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      fieldset {
+        border: var(--rule);
+        padding: 12px;
+        margin: 0;
+      }
+      legend {
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        padding: 0 4px;
+      }
+      /* A group is a disclosure: closed it is one line, open it is the fieldset
+         it always was. Nothing is hidden — the heading of every group stays on
+         screen, which is what keeps them findable. */
+      details.group {
+        border: var(--rule);
+      }
+      details.group > summary {
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-weight: 700;
+        list-style: none;
+      }
+      details.group > summary::-webkit-details-marker {
+        display: none;
+      }
+      details.group > summary::before {
+        content: "+ ";
+      }
+      details.group[open] > summary::before {
+        content: "− ";
+      }
+      details.group[open] > summary {
+        border-bottom: var(--rule);
+      }
+      details.group > summary:hover {
+        background: var(--ink);
+        color: var(--paper);
+        text-shadow: none;
+      }
+      details.group > .body {
+        padding: 12px;
+      }
+      details.group[hidden] {
+        display: none;
+      }
+      /* Bloom is inherited from the rail, so the places it would hurt turn it
+         off rather than each heading turning it on. A halo behind text the user
+         is typing or reading a number off is glare, not atmosphere. */
+      select,
+      textarea,
+      input,
+      button,
+      output,
+      .reason {
+        text-shadow: none;
+      }
+      label {
+        display: block;
+        margin-bottom: 12px;
+      }
+      label:last-child {
+        margin-bottom: 0;
+      }
+      label > span {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      label[hidden],
+      .reason[hidden] {
+        display: none;
+      }
+      /* Inert controls stay put and explain themselves. Vanishing controls read
+         as a broken app and teach the user nothing. */
+      label.is-disabled {
+        opacity: 0.45;
+      }
+      .reason {
+        font-size: 11px;
+        margin: -6px 0 12px;
+        padding-left: 8px;
+        border-left: var(--rule);
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: var(--ink);
+      }
+      input[type="checkbox"] {
+        accent-color: var(--ink);
+      }
+      select,
+      input[type="color"] {
+        font: inherit;
+        width: 100%;
+        border: var(--rule);
+        background: var(--dim);
+        color: var(--ink);
+        padding: 4px;
+      }
+      input[type="color"] {
+        width: 48%;
+        height: 32px;
+        padding: 2px;
+      }
+      textarea {
+        font: inherit;
+        width: 100%;
+        border: var(--rule);
+        background: var(--dim);
+        color: var(--ink);
+        padding: 6px;
+        resize: vertical;
+      }
+      button {
+        font: inherit;
+        background: var(--dim);
+        color: var(--ink);
+        border: var(--rule);
+        padding: 8px 12px;
+        cursor: pointer;
+        width: 100%;
+      }
+      button:hover {
+        background: var(--ink);
+        color: var(--paper);
+      }
+      /* The tube itself, behind the picture — flat, so nothing competes with
+         the canvas or implies a tone the export does not have. */
+      #stage {
+        background: var(--paper);
+      }
+      :focus-visible {
+        outline: 3px solid var(--ink);
+        outline-offset: 2px;
+      }
+      #stage {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        min-width: 0;
+        /* Same reason as the rail: without it the cell grows instead of scrolling. */
+        min-height: 0;
+        overflow: hidden;
+      }
+      /* The picture gets whatever height the controls below it do not need.
+         Capping the canvas at the viewport instead let a tall video push the
+         play button and the timeline past the bottom of a fixed-height stage,
+         where no amount of scrolling reaches them. */
+      #frame {
+        /* Basis 0, not auto: with an auto basis this box's height comes from
+           its content, so the canvas's own `max-height: 100%` resolves against
+           an indefinite height and is ignored entirely — the picture kept its
+           full size and pushed the controls out anyway. A zero basis makes the
+           height come from the free space, which is definite. */
+        flex: 1 1 0;
+        min-height: 0;
+        width: 100%;
+        /* Flex, not grid: a grid's implicit row is `auto`-sized and therefore
+           indefinite, so the canvas's percentage `max-height` resolved to
+           nothing and the picture kept its full height regardless. A flex
+           container with a definite height gives the percentage something to
+           resolve against. */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #frame[hidden] {
+        display: none;
+      }
+      #timeline {
+        width: min(100%, 640px);
+      }
+      #timeline input[type="range"] {
+        width: 100%;
+      }
+      #timeline input:disabled {
+        opacity: 0.45;
+      }
+      #scrubReadout {
+        margin: 2px 0 0;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      #play {
+        width: auto;
+        min-width: 8em;
+        justify-self: center;
+      }
+      #stage.dragging {
+        background: var(--dim);
+      }
+      /* Sized in `fitCanvas`, not here.
+         `max-*` alone only ever shrinks, so a photo smaller than the stage was
+         drawn at its own pixel size in the middle of a large empty pane, which
+         reads as the app padding a background around it. `width: 100%` scales
+         up but stretches a tall picture, because a specified width means the
+         height cap no longer re-solves the ratio. `object-fit: contain` keeps
+         the ratio but leaves the border framing empty space. So the fit is
+         computed and the box always hugs the picture. */
+      canvas {
+        display: block;
+        border: var(--rule);
+        /* Outside the border box, so it lights the bezel and never a pixel of
+           the picture. No filter, tint or overlay touches the canvas: what is
+           on screen is what a PNG export contains. */
+        box-shadow: 0 0 18px rgb(74 240 138 / 0.28);
+        image-rendering: pixelated;
+        /* A floor under `fitCanvas`, not a replacement for it. The fit is what
+           scales a small picture *up*; these only stop a large one overflowing
+           in the window between the bitmap being resized and the fit running,
+           which is otherwise a picture spilling out of a pane that cannot
+           scroll. */
+        max-width: 100%;
+        max-height: 100%;
+      }
+      canvas[hidden] {
+        display: none;
+      }
+      #empty {
+        border: 2px dashed var(--ink);
+        padding: 48px 32px;
+        text-align: center;
+        max-width: 22em;
+      }
+      @media (max-width: 700px) {
+        body {
+          grid-template-columns: 1fr;
+          height: auto;
+          overflow: visible;
+        }
+        #rail,
+        #stage {
+          overflow: visible;
+        }
+        #rail {
+          border-right: 0;
+          border-bottom: var(--rule);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="rail">
+      <div id="masthead">
+        <h1>
+          <span data-i18n="app.title"></span>
+          <small data-i18n="app.subtitle"></small>
+        </h1>
+      </div>
+
+      <div>
+        <input type="file" id="file" accept="image/*,video/*" hidden />
+        <button type="button" id="pick" data-i18n="image.open"></button>
+      </div>
+      <!-- Video gets its own group rather than sitting under the still-image
+           exports. Buried at the bottom of that list it was a screen and a half
+           down the rail, which reads as the button having gone missing. The
+           whole group hides when the file is not a video. -->
+      <details class="group" data-when="video" open>
+        <summary data-i18n="group.video"></summary>
+        <div class="body">
+        <label>
+          <button type="button" id="exportVideo" data-i18n="video.export"></button>
+        </label>
+        <label data-when="exporting">
+          <button type="button" id="cancelVideo" data-i18n="video.cancel"></button>
+        </label>
+        <label>
+          <span
+            ><span data-i18n="video.smoothing"></span><output id="temporalSmoothingOut"></output
+          ></span>
+          <input type="range" id="temporalSmoothing" />
+        </label>
+        <p class="reason" data-when="unstable" data-i18n="video.unstable"></p>
+        <p class="reason" id="videoInfo"></p>
+      </div>
+      </details>
+
+      <details class="group" open>
+        <summary data-i18n="group.effect"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="effect.algorithm"></span>
+          <select id="algorithm">
+            <optgroup data-i18n-label="family.errorDiffusion">
+              <option value="floyd-steinberg" data-i18n="algo.floyd-steinberg"></option>
+              <option value="atkinson" data-i18n="algo.atkinson"></option>
+              <option value="jarvis" data-i18n="algo.jarvis"></option>
+              <option value="stucki" data-i18n="algo.stucki"></option>
+              <option value="burkes" data-i18n="algo.burkes"></option>
+              <option value="sierra" data-i18n="algo.sierra"></option>
+              <option value="sierra-lite" data-i18n="algo.sierra-lite"></option>
+            </optgroup>
+            <optgroup data-i18n-label="family.ordered">
+              <option value="bayer" data-i18n="algo.bayer"></option>
+              <option value="blue-noise" data-i18n="algo.blue-noise"></option>
+              <option value="white-noise" data-i18n="algo.white-noise"></option>
+              <option value="threshold" data-i18n="algo.threshold"></option>
+            </optgroup>
+            <optgroup data-i18n-label="family.screen">
+              <option value="halftone" data-i18n="algo.halftone"></option>
+            </optgroup>
+          </select>
+        </label>
+        <label>
+          <span><span data-i18n="effect.pixelSize"></span><output id="pixelSizeOut"></output></span>
+          <input type="range" id="pixelSize" />
+        </label>
+        <label data-disable="levelsInert">
+          <span><span data-i18n="effect.levels"></span><output id="levelsOut"></output></span>
+          <input type="range" id="levels" />
+        </label>
+        <p class="reason" data-when="halftone" data-i18n="reason.halftoneLevels"></p>
+        <p class="reason" data-when="palette" data-i18n="reason.paletteLevels"></p>
+        <p class="reason" data-when="braille" data-i18n="reason.brailleLevels"></p>
+        <label data-when="diffusion">
+          <input type="checkbox" id="serpentine" />
+          <span data-i18n="effect.serpentine"></span>
+        </label>
+        <label data-when="ordered">
+          <span>
+            <span data-i18n="effect.patternStrength"></span>
+            <output id="patternStrengthOut"></output>
+          </span>
+          <input type="range" id="patternStrength" list="detent" />
+          <datalist id="detent"><option value="1"></option></datalist>
+        </label>
+        <label data-when="bayer">
+          <span data-i18n="effect.bayerSize"></span>
+          <select id="bayerSize">
+            <option value="2">2×2</option>
+            <option value="4">4×4</option>
+            <option value="8">8×8</option>
+            <option value="16">16×16</option>
+          </select>
+        </label>
+        <label data-when="halftone">
+          <span
+            ><span data-i18n="effect.halftoneCell"></span><output id="halftoneCellOut"></output
+          ></span>
+          <input type="range" id="halftoneCell" />
+        </label>
+        <label data-when="halftone">
+          <span
+            ><span data-i18n="effect.halftoneAngle"></span><output id="halftoneAngleOut"></output
+          ></span>
+          <input type="range" id="halftoneAngle" />
+        </label>
+        <label data-when="halftone">
+          <span data-i18n="effect.halftoneShape"></span>
+          <select id="halftoneShape">
+            <option value="circle" data-i18n="shape.circle"></option>
+            <option value="square" data-i18n="shape.square"></option>
+            <option value="line" data-i18n="shape.line"></option>
+          </select>
+        </label>
+        <label data-when="halftone">
+          <span data-i18n="effect.halftoneInk"></span>
+          <input type="color" id="halftoneInk" value="#000000" />
+          <input type="color" id="halftonePaper" value="#ffffff" />
+        </label>
+        <label>
+          <span
+            ><span data-i18n="effect.thresholdBias"></span><output id="thresholdBiasOut"></output
+          ></span>
+          <input type="range" id="thresholdBias" />
+        </label>
+      </div>
+      </details>
+
+      <details class="group">
+        <summary data-i18n="group.motion"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="motion.mode"></span>
+          <select id="motion">
+            <option value="none" data-i18n="motion.none"></option>
+            <option value="breathe" data-i18n="motion.breathe"></option>
+            <option value="pulse" data-i18n="motion.pulse"></option>
+            <option value="wave" data-i18n="motion.wave"></option>
+            <option value="spiral" data-i18n="motion.spiral"></option>
+            <option value="rain" data-i18n="motion.rain"></option>
+            <option value="ripple" data-i18n="motion.ripple"></option>
+            <option value="sparkle" data-i18n="motion.sparkle"></option>
+            <option value="cellular" data-i18n="motion.cellular"></option>
+          </select>
+        </label>
+        <label data-when="motion">
+          <span
+            ><span data-i18n="motion.amount"></span><output id="motionAmountOut"></output
+          ></span>
+          <input type="range" id="motionAmount" />
+        </label>
+        <label data-when="motion">
+          <span
+            ><span data-i18n="motion.speed"></span><output id="motionSpeedOut"></output
+          ></span>
+          <input type="range" id="motionSpeed" />
+        </label>
+        <p class="reason" data-when="motionStill" data-i18n="motion.stillNote"></p>
+      </div>
+      </details>
+
+      <details class="group" data-when="photo">
+        <summary data-i18n="group.hover"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="hover.mode"></span>
+          <select id="hover">
+            <option value="none" data-i18n="hover.none"></option>
+            <option value="flashlight" data-i18n="hover.flashlight"></option>
+            <option value="magnifier" data-i18n="hover.magnifier"></option>
+            <option value="neon" data-i18n="hover.neon"></option>
+            <option value="ice" data-i18n="hover.ice"></option>
+            <option value="gravity" data-i18n="hover.gravity"></option>
+          </select>
+        </label>
+        <label data-when="hover">
+          <span
+            ><span data-i18n="hover.radius"></span><output id="hoverRadiusOut"></output
+          ></span>
+          <input type="range" id="hoverRadius" />
+        </label>
+        <label data-when="hover">
+          <span
+            ><span data-i18n="hover.strength"></span><output id="hoverStrengthOut"></output
+          ></span>
+          <input type="range" id="hoverStrength" />
+        </label>
+        <p class="reason" data-when="hover" data-i18n="hover.note"></p>
+      </div>
+      </details>
+      <p class="reason" data-when="hoverVideo" data-i18n="hover.videoNote"></p>
+
+      <details class="group">
+        <summary data-i18n="group.text"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="text.mode"></span>
+          <select id="text">
+            <option value="off" data-i18n="textmode.off"></option>
+            <option value="ramp" data-i18n="textmode.ramp"></option>
+            <option value="flow" data-i18n="textmode.flow"></option>
+            <option value="braille" data-i18n="textmode.braille"></option>
+          </select>
+        </label>
+        <p class="reason" data-when="ramp" data-i18n="note.rampScrambles"></p>
+        <p class="reason" data-when="flow" data-i18n="note.flowReads"></p>
+        <label data-when="text">
+          <span data-i18n="text.content"></span>
+          <textarea id="textContent" rows="3"></textarea>
+        </label>
+        <label data-when="text">
+          <button type="button" id="varnamala" data-i18n="text.varnamala"></button>
+        </label>
+        <p class="reason" data-when="ranjana" data-i18n="text.ranjanaNote"></p>
+        <label data-when="text">
+          <span data-i18n="text.font"></span>
+          <select id="textFont">
+            <option value="devanagari" data-i18n="font.devanagari"></option>
+            <option value="mono" data-i18n="font.mono"></option>
+            <option value="ranjana" data-i18n="font.ranjana"></option>
+          </select>
+        </label>
+        <label data-when="ramp">
+          <span
+            ><span data-i18n="text.glyphSteps"></span><output id="glyphStepsOut"></output
+          ></span>
+          <input type="range" id="glyphSteps" />
+        </label>
+        <p class="reason" data-when="ramp" id="effectiveSteps"></p>
+        <label data-when="text">
+          <span><span data-i18n="text.cellAspect"></span><output id="cellAspectOut"></output></span>
+          <input type="range" id="cellAspect" />
+        </label>
+        <label data-when="text">
+          <span><span data-i18n="text.glow"></span><output id="glowOut"></output></span>
+          <input type="range" id="glow" />
+        </label>
+        <p class="reason" data-when="glowVideo" data-i18n="reason.glowCpu"></p>
+        <label data-when="braille">
+          <span><span data-i18n="braille.dotRadius"></span><output id="dotRadiusOut"></output></span>
+          <input type="range" id="dotRadius" />
+        </label>
+        <label data-when="braille">
+          <span><span data-i18n="braille.dotSpacing"></span><output id="dotSpacingOut"></output></span>
+          <input type="range" id="dotSpacing" />
+        </label>
+        <label data-when="braille">
+          <input type="checkbox" id="brailleBharati" />
+          <span data-i18n="braille.bharati"></span>
+        </label>
+        <p class="reason" data-when="bharati" data-i18n="braille.approximate"></p>
+        <p class="reason" data-when="bharati" id="bharatiCoverage"></p>
+        <label data-when="flow">
+          <span><span data-i18n="flow.weight"></span><output id="flowWeightOut"></output></span>
+          <input type="range" id="flowWeight" />
+        </label>
+        <label data-when="flow">
+          <span><span data-i18n="flow.size"></span><output id="flowSizeOut"></output></span>
+          <input type="range" id="flowSize" />
+        </label>
+        <label data-when="flow">
+          <span><span data-i18n="flow.opacity"></span><output id="flowOpacityOut"></output></span>
+          <input type="range" id="flowOpacity" />
+        </label>
+        <label data-when="flow">
+          <span><span data-i18n="flow.wordGap"></span><output id="flowWordGapOut"></output></span>
+          <input type="range" id="flowWordGap" />
+        </label>
+        <label data-when="flow">
+          <input type="checkbox" id="flowKeepWords" />
+          <span data-i18n="flow.keepWords"></span>
+        </label>
+        <p class="reason" data-when="flow" id="flowTruncated"></p>
+        <label data-when="flow">
+          <span data-i18n="flow.fit"></span>
+          <select id="flowFit">
+            <option value="repeat" data-i18n="fit.repeat"></option>
+            <option value="stretch" data-i18n="fit.stretch"></option>
+          </select>
+        </label>
+        <label data-when="ramp">
+          <button type="button" id="copyText" data-i18n="text.copy"></button>
+        </label>
+        <p class="reason" data-when="ramp" data-i18n="text.copyWarning"></p>
+      </div>
+      </details>
+
+      <details class="group" open>
+        <summary data-i18n="group.tone"></summary>
+        <div class="body">
+        <label>
+          <span><span data-i18n="tone.brightness"></span><output id="brightnessOut"></output></span>
+          <input type="range" id="brightness" />
+        </label>
+        <label>
+          <span><span data-i18n="tone.contrast"></span><output id="contrastOut"></output></span>
+          <input type="range" id="contrast" />
+        </label>
+        <label>
+          <span><span data-i18n="tone.gamma"></span><output id="gammaOut"></output></span>
+          <input type="range" id="gamma" />
+        </label>
+        <label>
+          <input type="checkbox" id="invert" />
+          <span data-i18n="tone.invert"></span>
+        </label>
+      </div>
+      </details>
+
+      <details class="group">
+        <summary data-i18n="group.ink"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="ink.mode"></span>
+          <select id="outputMode">
+            <option value="mono" data-i18n="mode.mono"></option>
+            <option value="duo" data-i18n="mode.duo"></option>
+            <option value="color" data-i18n="mode.color"></option>
+            <option value="palette" data-i18n="mode.palette"></option>
+          </select>
+        </label>
+        <p class="reason" data-when="halftone" data-i18n="reason.halftoneMode"></p>
+        <label data-when="palette">
+          <span data-i18n="ink.palette"></span>
+          <select id="paletteIndex"></select>
+        </label>
+        <label data-when="palette">
+          <input type="file" id="paletteFile" accept="image/*" hidden />
+          <button type="button" id="paletteUpload" data-i18n="ink.paletteUpload"></button>
+        </label>
+        <p class="reason" data-when="palette" data-i18n="ink.paletteNote"></p>
+        <p class="reason" data-when="rampColor" data-i18n="note.rampColor"></p>
+        <p class="reason" data-when="braille" data-i18n="reason.brailleColor"></p>
+        <label data-when="inkPair">
+          <span data-i18n="ink.duoColors"></span>
+          <input type="color" id="duoDark" value="#000000" />
+          <input type="color" id="duoLight" value="#ffffff" />
+        </label>
+        <label>
+          <input type="checkbox" id="cutLightest" />
+          <span data-i18n="ink.cutLightest"></span>
+        </label>
+      </div>
+      </details>
+
+      <details class="group">
+        <summary data-i18n="group.presets"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="preset.saved"></span>
+          <select id="presetPick"></select>
+        </label>
+        <label>
+          <input type="text" id="presetName" />
+        </label>
+        <label>
+          <button type="button" id="presetSave" data-i18n="preset.save"></button>
+        </label>
+        <label>
+          <button type="button" id="presetCopyLink" data-i18n="preset.copyLink"></button>
+        </label>
+        <label>
+          <input type="file" id="presetFile" accept="application/json" hidden />
+          <button type="button" id="presetImport" data-i18n="preset.import"></button>
+        </label>
+        <label>
+          <button type="button" id="presetExport" data-i18n="preset.export"></button>
+        </label>
+        <p class="reason" id="presetStatus"></p>
+      </div>
+      </details>
+
+      <details class="group" open>
+        <summary data-i18n="group.export"></summary>
+        <div class="body">
+        <label>
+          <span data-i18n="export.scale"></span>
+          <!-- Options are built in main.ts: each carries a number, and a number
+               beside a label is exactly the concatenation that has to become a
+               slot instead. -->
+          <select id="scale"></select>
+        </label>
+        <button type="button" id="export" data-i18n="export.png"></button>
+        <label>
+          <button type="button" id="exportLadder" data-i18n="export.ladder"></button>
+        </label>
+        <label data-when="ladder">
+          <button type="button" id="cancelLadder" data-i18n="export.ladderCancel"></button>
+        </label>
+        <p class="reason" data-when="ladder" data-i18n="export.ladderNote"></p>
+        <p class="reason" id="ladderStatus"></p>
+      </div>
+      </details>
+
+    </div>
+
+    <div id="stage">
+      <p id="empty" data-i18n="stage.empty"></p>
+      <div id="frame"><canvas id="out" hidden></canvas></div>
+      <button type="button" id="play" data-when="video" data-i18n="video.play"></button>
+      <div id="timeline" data-when="video">
+        <input type="range" id="scrub" min="0" max="1000" value="0" step="1" />
+        <p id="scrubReadout"></p>
+        <p class="reason" data-when="noScrub" data-i18n="video.noScrub"></p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
