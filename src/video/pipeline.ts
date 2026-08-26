@@ -6,6 +6,7 @@
  * rendering path that draws a still draws every one of them.
  */
 
+import { motionPeriod } from "../core/motion.ts";
 import type { ParamSet, ParamSource } from "../params.ts";
 import { GpuPipeline, gpuSupports, textArtFor } from "../render/gpu.ts";
 import { FONT_STACK, sourceSize } from "../render/image.ts";
@@ -17,18 +18,25 @@ import {
   decodeFramesViaElement,
   inspect,
 } from "./decode.ts";
-import { audioSurvives, chooseEncoding, VideoExporter, type Container } from "./encode.ts";
+import {
+  audioSurvives,
+  chooseEncoding,
+  evenDimension,
+  VideoExporter,
+  type Container,
+} from "./encode.ts";
+import { Recorder, type RecordFormat, type RecordResult } from "./record.ts";
 
 export interface ExportProgress {
   frame: number;
   total: number;
-  container: Container;
+  container: Container | "gif";
   audioKept: boolean;
 }
 
 export interface ExportResult {
   blob: Blob;
-  container: Container;
+  container: Container | "gif";
   frames: number;
   /**
    * How many frames the container said the track held.
@@ -96,10 +104,18 @@ export async function exportVideo(options: {
   cpu: StillPipeline;
   gpu: GpuPipeline;
   bitrate: number;
+  /**
+   * Video or GIF. The decode side is identical either way — this only chooses
+   * what the finished frames are written into, which is why it arrives here as
+   * one flag rather than as a second export function.
+   */
+  format?: RecordFormat;
+  gifFps?: number;
   onProgress?: (progress: ExportProgress) => void;
   signal?: AbortSignal;
 }): Promise<ExportResult> {
   const { file, params, text, cpu, gpu, bitrate, onProgress, signal } = options;
+  const format = options.format ?? "video";
   const { source, mp4 } = await stage("reading the video", () => inspect(file));
 
   // The first decoded frame is the authority on dimensions, so the encoder
@@ -109,8 +125,10 @@ export async function exportVideo(options: {
   // the encoder from it re-encodes every frame into the wrong shape. The
   // orientation is not lost, it is carried to the muxer as a rotation instead.
   interface Ready {
-    exporter: VideoExporter;
-    container: Container;
+    /** Exactly one of these. GIF has no muxer, no audio and no rotation matrix. */
+    exporter: VideoExporter | null;
+    recorder: Recorder | null;
+    container: Container | "gif";
     audioKept: boolean;
     outW: number;
     outH: number;
@@ -151,27 +169,50 @@ export async function exportVideo(options: {
         // Sized from the frame itself, never from the header. Both frame kinds
         // report their size through a different property — see `sourceSize`.
         const { w, h } = sourceSize(frame);
-        const encoding = await stage("choosing an encoder", () =>
-          chooseEncoding(w, h, source.fps, bitrate),
-        );
-        state.ready = {
-          exporter: new VideoExporter({
-            encoding,
-            fps: source.fps,
-            audio: source.audio,
-            rotation: source.rotation,
-          }),
-          container: encoding.container,
-          audioKept: audioSurvives(encoding.container, source.audio),
-          outW: encoding.config.width,
-          outH: encoding.config.height,
-        };
+        if (format === "gif") {
+          const recorder = await stage("starting the GIF", () =>
+            Recorder.start({
+              format: "gif",
+              width: w,
+              height: h,
+              fps: source.fps,
+              gifFps: options.gifFps,
+            }),
+          );
+          state.ready = {
+            exporter: null,
+            recorder,
+            container: "gif",
+            // A GIF has no audio track and no way to acquire one. Said here so
+            // the caller reports it the same way it reports a dropped AAC.
+            audioKept: false,
+            outW: evenDimension(w),
+            outH: evenDimension(h),
+          };
+        } else {
+          const encoding = await stage("choosing an encoder", () =>
+            chooseEncoding(w, h, source.fps, bitrate),
+          );
+          state.ready = {
+            exporter: new VideoExporter({
+              encoding,
+              fps: source.fps,
+              audio: source.audio,
+              rotation: source.rotation,
+            }),
+            recorder: null,
+            container: encoding.container,
+            audioKept: audioSurvives(encoding.container, source.audio),
+            outW: encoding.config.width,
+            outH: encoding.config.height,
+          };
+        }
       }
-      const { exporter, container, audioKept, outW, outH } = state.ready;
+      const { exporter, recorder, container, audioKept, outW, outH } = state.ready;
 
       const resolved = params.resolve(mediaTime);
 
-      let painted: CanvasImageSource;
+      let painted: HTMLCanvasElement;
       if (pathFor(resolved, text.at(mediaTime).clusters) === "gpu") {
         const cols = Math.max(1, Math.round(outW / resolved.pixelSize));
         const rows = Math.max(1, Math.round(outH / (resolved.pixelSize * resolved.cellAspect)));
@@ -198,7 +239,8 @@ export async function exportVideo(options: {
         }
       }
 
-      await exporter.addFrame(painted, index, mediaTime);
+      if (recorder) await recorder.addFrame(painted, mediaTime);
+      else await exporter!.addFrame(painted, index, mediaTime);
       frames++;
       onProgress?.({ frame: index + 1, total: source.frameCount, container, audioKept });
     } finally {
@@ -217,15 +259,129 @@ export async function exportVideo(options: {
   if (!state.ready) {
     throw new Error(`decoding ${source.codec}: the file decoded to no frames at all`);
   }
-  const { exporter, container, audioKept } = state.ready;
+  const { exporter, recorder, container, audioKept } = state.ready;
 
-  const blob = await stage("writing the file", () => exporter.finish());
+  const blob = await stage("writing the file", async () =>
+    recorder ? (await recorder.finish()).blob : exporter!.finish(),
+  );
   return {
     blob,
     container,
-    frames,
+    frames: recorder ? recorder.frameCount : frames,
     expectedFrames: source.frameCount,
     audioKept,
     usedFallback: !webCodecs,
   };
+}
+
+/**
+ * How long one loop of the current animation lasts, and whether it truly loops.
+ *
+ * An animated export has to be cut somewhere. Cutting at a round number of
+ * seconds puts a visible jump at the loop point of a four-second breath, which
+ * looks like a broken encoder rather than a rounding decision — so the duration
+ * comes from the field's own period where it has one. Rain and Sparkle do not
+ * repeat at all, and rather than pretend otherwise the caller is handed a
+ * default length and told the loop will not be seamless.
+ */
+export const DEFAULT_LOOP_SECONDS = 4;
+
+export interface AnimationPlan {
+  /** What the export will actually be, in seconds. */
+  seconds: number;
+  /** One loop of the field, or null where it has none. */
+  period: number | null;
+  /** How many whole loops that duration holds. 0 when the field does not loop. */
+  repeats: number;
+  /** True when the end of the export meets its beginning. */
+  seamless: boolean;
+}
+
+export function animationPlan(params: ParamSet): AnimationPlan {
+  const period = motionPeriod(params.motion, params.motionSpeed);
+  if (period === null) {
+    return { seconds: DEFAULT_LOOP_SECONDS, period: null, repeats: 0, seamless: false };
+  }
+  // A four-second breath is one loop; a sixteenth-of-a-second pulse at speed 16
+  // is not worth exporting on its own, so short periods are repeated up to
+  // something watchable. Whole repeats only — a partial one would reintroduce
+  // exactly the jump the period was chosen to avoid.
+  const repeats = Math.max(1, Math.round(DEFAULT_LOOP_SECONDS / period));
+  return { seconds: period * repeats, period, repeats, seamless: true };
+}
+
+/**
+ * A still under an animation, rendered frame by frame into a video or a GIF.
+ *
+ * The counterpart to `exportVideo`: same renderer, same seam, but the frames
+ * are generated from the clock rather than decoded from a file. `t` is derived
+ * from the frame index for the reason given above — an accumulating clock would
+ * make two exports of the same settings differ.
+ */
+export async function exportAnimation(options: {
+  /**
+   * Narrower than `CanvasImageSource` on purpose. The GPU path uploads this as
+   * a texture and the CPU path draws it to a canvas, and only these three
+   * satisfy both — `CanvasImageSource` also admits `SVGImageElement`, which
+   * `texImage2D` will not take.
+   */
+  source: ImageBitmap | HTMLVideoElement | HTMLCanvasElement;
+  params: ParamSource;
+  text: TextSource;
+  cpu: StillPipeline;
+  gpu: GpuPipeline;
+  format: RecordFormat;
+  fps: number;
+  /** Seconds of animation to render. `animationPlan` is what should be choosing this. */
+  seconds: number;
+  gifFps?: number;
+  bitrate?: number;
+  onProgress?: (frame: number, total: number) => void;
+  signal?: AbortSignal;
+}): Promise<RecordResult> {
+  const { source, params, text, cpu, gpu, format, fps, seconds, onProgress, signal } = options;
+
+  const { w, h } = sourceSize(source);
+  const total = Math.max(1, Math.round(seconds * fps));
+
+  const recorder = await stage("starting the recording", () =>
+    Recorder.start({
+      format,
+      width: w,
+      height: h,
+      fps,
+      gifFps: options.gifFps,
+      bitrate: options.bitrate,
+    }),
+  );
+
+  const scratch = document.createElement("canvas");
+
+  for (let index = 0; index < total; index++) {
+    if (signal?.aborted) break;
+    const time = index / fps;
+    const resolved = params.resolve(time);
+
+    let painted: HTMLCanvasElement;
+    if (pathFor(resolved, text.at(time).clusters) === "gpu") {
+      const cols = Math.max(1, Math.round(w / resolved.pixelSize));
+      const rows = Math.max(1, Math.round(h / (resolved.pixelSize * resolved.cellAspect)));
+      const art = textArtFor(resolved, text, FONT_STACK[resolved.textFont], cols, rows);
+      gpu.render(source, w, h, resolved, art ?? undefined, time);
+      painted = gpu.canvas;
+    } else {
+      cpu.render(source, resolved, text, scratch, 1, time);
+      painted = scratch;
+    }
+
+    const room = await recorder.addFrame(painted, time);
+    onProgress?.(index + 1, total);
+    // Yielding keeps the progress line painting and the cancel button live. A
+    // four-second animation is a hundred and twenty renders, which is long
+    // enough to look frozen without it.
+    if ((index & 3) === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!room) break;
+  }
+
+  return stage("writing the file", () => recorder.finish());
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { MOTION_IDS, motionField, type MotionId } from "./motion.ts";
+import { MOTION_IDS, motionField, motionPeriod, type MotionId } from "./motion.ts";
 
 const animated = MOTION_IDS.filter((id) => id !== "none");
 
@@ -165,4 +165,43 @@ test("sparkle leaves most of the frame dark", () => {
   // Sparse by design: a field that lights most cells is a flicker, not a spark.
   expect(lit / total).toBeLessThan(0.2);
   expect(lit).toBeGreaterThan(0);
+});
+
+test("a field that claims a period really does repeat on it", () => {
+  // The claim is worth testing because it is a hand-derived constant: the
+  // period comes from reading the coefficient time is multiplied by inside the
+  // field, and a field edited later without the constant being updated would
+  // still animate perfectly and only show itself as a jump at the loop point of
+  // an export. Sampling the field a whole period apart is the check.
+  for (const id of animated) {
+    for (const speed of [0.5, 1, 2.3]) {
+      const period = motionPeriod(id, speed);
+      if (period === null) continue;
+      const field = motionField(id, speed, 16 / 9);
+      for (const t of [0, 0.13, 0.5, 1.7]) {
+        for (const [u, v] of [
+          [0, 0],
+          [0.25, 0.75],
+          [0.5, 0.5],
+          [1, 1],
+        ]) {
+          expect(field(u!, v!, t + period), `${id} at speed ${speed}, t=${t}`).toBeCloseTo(
+            field(u!, v!, t),
+            9,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("the fields that cannot loop say so rather than naming a wrong period", () => {
+  // Rain's 48 columns run at hashed rates and Sparkle re-hashes every step, so
+  // neither has a period an export could cut on. Claiming one would be worse
+  // than admitting there is none.
+  expect(motionPeriod("rain")).toBeNull();
+  expect(motionPeriod("sparkle")).toBeNull();
+  expect(motionPeriod("none")).toBeNull();
+  // A stopped clock has no period either, and dividing by it would give one.
+  expect(motionPeriod("breathe", 0)).toBeNull();
 });

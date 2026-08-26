@@ -379,7 +379,82 @@
       <div>
         <input type="file" id="file" accept="image/*,video/*" hidden />
         <button type="button" id="pick" data-i18n="image.open"></button>
+        <!-- Selecting the camera does NOT open it. It opens the group below,
+             which says what is about to happen and carries the button that
+             actually asks. A control labelled "camera" that turns the light on
+             the instant it is clicked is the thing this avoids. -->
+        <button type="button" id="useCamera" data-i18n="camera.use"></button>
       </div>
+
+      <!-- Two states in one group: before permission it is a consent notice and
+           one button, after it is the live controls. Never both. -->
+      <details class="group" data-when="cameraGroup" open>
+        <summary data-i18n="group.camera"></summary>
+        <div class="body">
+          <p class="reason" data-when="cameraAsk" data-i18n="camera.consent"></p>
+          <label data-when="cameraAsk">
+            <button type="button" id="cameraAllow" data-i18n="camera.allow"></button>
+          </label>
+          <p class="reason" data-when="cameraBlocked" data-i18n="camera.blocked"></p>
+          <label data-when="cameraPick">
+            <span data-i18n="camera.device"></span>
+            <select id="cameraDevice"></select>
+          </label>
+          <label data-when="cameraLive">
+            <input type="checkbox" id="cameraMirror" checked />
+            <span data-i18n="camera.mirror"></span>
+          </label>
+          <label data-when="cameraLive">
+            <button type="button" id="record" data-i18n="camera.record"></button>
+          </label>
+          <label data-when="recording">
+            <button type="button" id="stopRecord" data-i18n="camera.stop"></button>
+          </label>
+          <label data-when="cameraLive">
+            <button type="button" id="cameraOff" data-i18n="camera.off"></button>
+          </label>
+          <p class="reason" data-when="cameraLive" data-i18n="camera.noAudio"></p>
+          <p class="reason" id="cameraStatus"></p>
+        </div>
+      </details>
+      <!-- Its own group, above the effect controls, for the reason the video
+           group is where it is: the format has to be chosen *before* Record is
+           pressed, and a picker a screen and a half further down the rail than
+           the button it governs is a picker nobody finds in time.
+
+           One control for all three animated exports — a clip, a live take and
+           an animated still end up in the same two containers, so a copy beside
+           each button would be three ways to say the same thing and three
+           chances for them to disagree. -->
+      <details class="group" data-when="animated" open>
+        <summary data-i18n="group.animated"></summary>
+        <div class="body">
+          <label>
+            <span data-i18n="export.format"></span>
+            <select id="animFormat">
+              <option value="video" data-i18n="format.video"></option>
+              <option value="gif" data-i18n="format.gif"></option>
+            </select>
+          </label>
+          <label data-when="gif">
+            <span data-i18n="export.gifFps"></span>
+            <!-- Built in main.ts: every option is a rate GIF can actually hold,
+                 and each one carries a number, which is exactly the label that
+                 has to become a slot. -->
+            <select id="gifFps"></select>
+          </label>
+          <p class="reason" data-when="gif" data-i18n="export.gifNote"></p>
+          <label data-when="animatedStill">
+            <button type="button" id="exportAnimation" data-i18n="export.animation"></button>
+          </label>
+          <label data-when="animating">
+            <button type="button" id="cancelAnimation" data-i18n="export.animationCancel"></button>
+          </label>
+          <p class="reason" data-when="animatedStill" id="animationPlan"></p>
+          <p class="reason" id="animationStatus"></p>
+        </div>
+      </details>
+
       <!-- Video gets its own group rather than sitting under the still-image
            exports. Buried at the bottom of that list it was a screen and a half
            down the rail, which reads as the button having gone missing. The
@@ -751,6 +826,7 @@
           <select id="scale"></select>
         </label>
         <button type="button" id="export" data-i18n="export.png"></button>
+        <p class="reason" data-when="stillOfAnimation" data-i18n="export.pngIsOneInstant"></p>
         <label>
           <button type="button" id="exportLadder" data-i18n="export.ladder"></button>
         </label>

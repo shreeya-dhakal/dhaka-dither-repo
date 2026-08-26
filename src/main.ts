@@ -44,7 +44,9 @@ import {
 import { StaticText } from "./text.ts";
 import { zip, type ZipEntry } from "./zip.ts";
 import { canDecode, inspect, type SourceVideo } from "./video/decode.ts";
-import { exportVideo, pathFor } from "./video/pipeline.ts";
+import { animationPlan, exportAnimation, exportVideo, pathFor } from "./video/pipeline.ts";
+import * as cameraApi from "./video/camera.ts";
+import { Recorder, type RecordFormat, type RecordResult } from "./video/record.ts";
 
 function need<T extends Element>(id: string): T {
   const el = document.getElementById(id);
@@ -81,6 +83,31 @@ let bitmap: ImageBitmap | null = null;
 /** Set when the loaded file is a video; the still preview is its first frame. */
 let video: { file: File; source: SourceVideo; scrubbable: boolean } | null = null;
 let exporting: AbortController | null = null;
+
+/**
+ * The live camera, once it is actually running. Null covers three different
+ * situations that the interface has to tell apart — never asked, asked and
+ * refused, asked and granted-but-not-open — so the *intent* is tracked
+ * separately in `cameraWanted` and the browser's answer in `cameraStatus`.
+ * Collapsing them into one nullable was the first version, and it could not say
+ * anything more useful than "no camera".
+ */
+let camera: { stream: MediaStream; settings: cameraApi.OpenCamera["settings"] } | null = null;
+/** The user has chosen the camera as the source. Not the same as it being on. */
+let cameraWanted = false;
+let cameraStatus: cameraApi.CameraStatus = "prompt";
+let cameraDevices: cameraApi.CameraDevice[] = [];
+let mirror = true;
+/** In flight while a take is being recorded; holds the frames written so far. */
+let recorder: Recorder | null = null;
+let recordStartedAt = 0;
+/** True while a frame is being handed to the recorder, so the pump cannot re-enter. */
+let recordBusy = false;
+/** The offline render of a still's animation. Separate from `exporting`, which is the file path. */
+let animating: AbortController | null = null;
+let animFormat: RecordFormat = "video";
+/** GIF target rate. Only the rates a centisecond delay can actually hold are offered. */
+let gifFps = 12.5;
 /** An output mode braille displaced, held so it can be handed back. */
 let displacedMode: "color" | null = null;
 /** A pointer effect that loading a video displaced, held so it can be handed back. */
@@ -101,6 +128,68 @@ player.muted = true;
 player.loop = true;
 player.playsInline = true;
 let playing = false;
+
+/**
+ * The camera's own element, not the file player's.
+ *
+ * Sharing one would mean `src` and `srcObject` fighting over the same element
+ * every time the source changed, and the file player carries state — a loop
+ * flag, a scrub position, a `seeked` handler — that means nothing to a live
+ * stream and would have to be unwound each way.
+ *
+ * Muted is not a preference here: an element playing an unmuted stream of the
+ * room the laptop is in is a feedback loop. No audio track is ever requested,
+ * so this is belt and braces.
+ */
+const cameraEl = document.createElement("video");
+cameraEl.muted = true;
+cameraEl.playsInline = true;
+cameraEl.autoplay = true;
+
+/** Where a mirrored frame is drawn. Reused, because it is written every frame. */
+const mirrorCanvas = document.createElement("canvas");
+
+/**
+ * The camera frame as the renderer should see it.
+ *
+ * Mirroring is done here rather than with a CSS transform on the canvas,
+ * because a CSS transform is not in the picture — it flips what is on screen
+ * and leaves every exported frame the other way round. The one thing this app
+ * promises about its canvas is that an export is exactly what is displayed.
+ */
+function cameraFrame(): HTMLVideoElement | HTMLCanvasElement {
+  if (!mirror) return cameraEl;
+  const w = cameraEl.videoWidth;
+  const h = cameraEl.videoHeight;
+  if (w === 0 || h === 0) return cameraEl;
+  if (mirrorCanvas.width !== w || mirrorCanvas.height !== h) {
+    mirrorCanvas.width = w;
+    mirrorCanvas.height = h;
+  }
+  const ctx = mirrorCanvas.getContext("2d");
+  if (!ctx) return cameraEl;
+  ctx.save();
+  ctx.setTransform(-1, 0, 0, 1, w, 0);
+  ctx.drawImage(cameraEl, 0, 0);
+  ctx.restore();
+  return mirrorCanvas;
+}
+
+/** Seconds since the camera opened. A live stream has no `currentTime` worth reading. */
+let cameraOpenedAt = 0;
+function cameraTime(): number {
+  return (performance.now() - cameraOpenedAt) / 1000;
+}
+
+/**
+ * True for any source that carries its own clock — a file being played, or a
+ * camera. Named for the property rather than for either medium: half a dozen
+ * decisions in `syncControls` turn on exactly this and were drifting apart as
+ * separate `video !== null` tests.
+ */
+function moving(): boolean {
+  return video !== null || camera !== null;
+}
 
 /**
  * Anything whose text is computed rather than looked up — slider read-outs,
@@ -141,9 +230,23 @@ let exportScale = 1;
  * overlap without either containing the other, and only these two satisfy both
  * the 2D path and the GL upload.
  */
-function currentSource(): ImageBitmap | HTMLVideoElement | null {
+function currentSource(): ImageBitmap | HTMLVideoElement | HTMLCanvasElement | null {
+  if (camera && cameraEl.readyState >= 2) return cameraFrame();
   if (video && player.readyState >= 2) return player;
   return bitmap;
+}
+
+/**
+ * The clock the renderer should resolve against, in seconds.
+ *
+ * Three sources, three clocks, one seam: a file plays on its own timeline, a
+ * camera on the wall clock since it opened, and a still on the preview clock
+ * that only runs when an animation is selected.
+ */
+function currentTime(): number {
+  if (camera) return cameraTime();
+  if (video) return player.currentTime;
+  return stillTime;
 }
 
 /**
@@ -156,7 +259,7 @@ let stillTime = 0;
 let stillClock: number | null = null;
 
 function syncStillClock(): void {
-  const animated = params.resolve(0).motion !== "none" && !video && currentSource() !== null;
+  const animated = params.resolve(0).motion !== "none" && !moving() && currentSource() !== null;
   if (animated && stillClock === null) {
     const started = performance.now();
     const tick = () => {
@@ -181,7 +284,7 @@ function syncStillClock(): void {
  * screen. Only live for stills: video has no pointer at export time.
  */
 function trackPointer(event: PointerEvent): void {
-  if (video || params.resolve(0).hover === "none") return;
+  if (moving() || params.resolve(0).hover === "none") return;
   const box = canvas.getBoundingClientRect();
   if (box.width === 0 || box.height === 0) return;
   params.update({
@@ -281,10 +384,10 @@ function draw(): void {
   // export legitimately differ: a PNG is a single instant, and `stillTime` is
   // the instant it captures, so what is exported is exactly what is on screen
   // at the moment the button is pressed.
-  const time = video ? player.currentTime : stillTime;
+  const time = currentTime();
   const resolved = params.resolve(time);
 
-  if (pathFor(resolved, textSource.at(time).clusters) === "gpu" && video) {
+  if (pathFor(resolved, textSource.at(time).clusters) === "gpu" && moving()) {
     // The GPU owns its own canvas — a canvas cannot hold both a WebGL2 and a
     // 2D context — so the result is blitted onto the stage.
     const { w, h } = sourceSize(source);
@@ -329,13 +432,15 @@ function draw(): void {
  * size control's own step, so no number here was invented.
  */
 function fillingPixelSize(): number | null {
-  if (!bitmap) return null;
+  const source = currentSource();
+  if (!source) return null;
   const current = params.resolve(0);
   const ink = textSource.at(0).clusters.filter((c) => c.trim() !== "").length;
   if (ink === 0) return null;
 
   const range = PARAM_RANGES.pixelSize;
-  const ideal = Math.sqrt((bitmap.width * bitmap.height) / (ink * current.cellAspect));
+  const { w: srcW, h: srcH } = sourceSize(source);
+  const ideal = Math.sqrt((srcW * srcH) / (ink * current.cellAspect));
 
   // Outside the control's range there is no setting that fills the frame, and
   // clamping to the nearest end would make the message a lie — at pixel size 64
@@ -400,7 +505,7 @@ function syncControls(): void {
     braille: current.text === "braille",
     // Worth saying only where the cost lands: a still repaints in milliseconds
     // either way, so the note would be noise outside an export.
-    glowVideo: current.glow > 0 && video !== null,
+    glowVideo: current.glow > 0 && moving(),
     bharati: current.text === "braille" && current.brailleBharati,
     // Both modes carry tone somewhere other than the level count.
     levelsInert:
@@ -412,9 +517,33 @@ function syncControls(): void {
     noScrub: video !== null && !video.scrubbable,
     // Named for the fact rather than the control: this is about the kernel
     // being unstable on video, not about smoothing being unavailable.
-    unstable: video !== null && current.algorithm in KERNELS,
+    unstable: moving() && current.algorithm in KERNELS,
     exporting: exporting !== null,
     ladder: ladderRunning,
+
+    // The camera group is open whenever the camera is the chosen source, which
+    // includes before permission — that is where the consent notice lives.
+    cameraGroup: cameraWanted,
+    cameraAsk: cameraWanted && camera === null,
+    cameraBlocked: cameraWanted && camera === null && cameraStatus === "denied",
+    cameraLive: camera !== null,
+    // A menu of one camera is not a choice, and before permission the labels
+    // are blank — so it appears only once there is something to pick between.
+    cameraPick: camera !== null && cameraDevices.length > 1,
+    recording: recorder !== null,
+
+    // Anything with a clock can be exported as an animation, which is the one
+    // condition the format control needs — it is the same MP4-or-GIF choice
+    // whether the frames come from a file, a camera, or a still under a field.
+    animated:
+      moving() || (current.motion !== "none" && bitmap !== null),
+    gif:
+      (moving() || (current.motion !== "none" && bitmap !== null)) && animFormat === "gif",
+    // Only a still has an animation to render offline: a clip and a live take
+    // already have their own export and record buttons.
+    animatedStill: !moving() && current.motion !== "none" && bitmap !== null,
+    animating: animating !== null,
+    stillOfAnimation: !moving() && current.motion !== "none" && bitmap !== null,
     // Density mode is ink on paper, so the ink pair belongs on screen there
     // too — not hidden behind picking Duo first, which is not where anyone
     // working in Density mode would think to look.
@@ -425,18 +554,20 @@ function syncControls(): void {
     ranjana: current.text !== "off" && current.textFont === "ranjana",
     motion: current.motion !== "none",
     // Only worth explaining where it applies: a video carries its own clock.
-    motionStill: current.motion !== "none" && video === null,
+    motionStill: current.motion !== "none" && !moving(),
     // Pointer effects are a still-image interaction, so the whole group is
     // hidden on video rather than disabled: it belongs to another medium,
     // not to a setting the user could fix. The note explains the absence.
-    photo: video === null,
-    hover: video === null && current.hover !== "none",
-    hoverVideo: video !== null && current.hover !== "none",
+    photo: !moving(),
+    hover: !moving() && current.hover !== "none",
+    hoverVideo: moving() && current.hover !== "none",
   };
 
   for (const el of document.querySelectorAll<HTMLElement>("[data-when]")) {
     el.hidden = !applies[el.dataset.when ?? ""];
   }
+
+  if (applies.animatedStill) showAnimationPlan();
 
   // Braille is ink on paper — dots are on or off — so there is no per-level
   // colour to give. Ramp does have one (its hue tint), which is why only
@@ -489,7 +620,7 @@ function syncControls(): void {
   // video displaces the choice outright — and hands it back on returning to a
   // photo, unless the user picked something else meanwhile.
   const hoverSelect = need<HTMLSelectElement>("hover");
-  if (video !== null) {
+  if (moving()) {
     if (current.hover !== "none") {
       displacedHover = current.hover;
       params.update({ hover: "none" });
@@ -791,6 +922,10 @@ async function openFile(file: File): Promise<void> {
 async function load(file: File): Promise<void> {
   bitmap?.close();
   video = null;
+  // A file and a camera are alternatives. Leaving the stream running would keep
+  // the hardware light on over a picture nobody is pointing a camera at.
+  if (camera) await closeCamera();
+  cameraWanted = false;
 
   if (file.type.startsWith("video/")) {
     const { source } = await inspect(file);
@@ -887,6 +1022,8 @@ async function runVideoExport(): Promise<void> {
       cpu: exportCpu,
       gpu: exportGpu,
       bitrate: 5_000_000,
+      format: animFormat,
+      gifFps,
       signal: exporting.signal,
       onProgress: ({ frame, total }) => {
         info.textContent = t("video.progress", { n: frame, total });
@@ -901,11 +1038,14 @@ async function runVideoExport(): Promise<void> {
     info.textContent =
       t("video.done") +
       " " +
-      t(result.audioKept ? "video.audioKept" : "video.audioDropped") +
-      (result.usedFallback ? " " + t("video.fallback") : "") +
-      (short > 1
-        ? " " + t("video.short", { n: result.frames, total: result.expectedFrames })
-        : "");
+      // A GIF cannot carry audio at all, so "this container cannot carry the
+      // source audio" is true but reads as a fault rather than as the format.
+      // The GIF note beside the format control already says it.
+      (result.container === "gif"
+        ? ""
+        : t(result.audioKept ? "video.audioKept" : "video.audioDropped") + " ") +
+      (result.usedFallback ? t("video.fallback") + " " : "") +
+      (short > 1 ? t("video.short", { n: result.frames, total: result.expectedFrames }) : "");
   } catch (error) {
     // Without this the whole export fails as an unhandled rejection: no file,
     // no message, nothing on screen to say anything went wrong.
@@ -917,6 +1057,351 @@ async function runVideoExport(): Promise<void> {
     exporting = null;
     syncControls();
   }
+}
+
+/* ------------------------------------------------------------------------- *
+ * The live camera.
+ *
+ * Two steps, deliberately. Choosing the camera as a source opens the group and
+ * shows what is about to happen; a second, separate press is what actually
+ * calls `getUserMedia` and raises the browser's prompt. Nothing on this page
+ * touches the hardware without that press — not to build a device menu, not to
+ * check whether a camera exists.
+ * ------------------------------------------------------------------------- */
+
+/** Offer the camera. Does not open it — see the note on the two steps above. */
+async function chooseCamera(): Promise<void> {
+  cameraWanted = true;
+  cameraStatus = await cameraApi.status();
+  const status = need<HTMLParagraphElement>("cameraStatus");
+  status.textContent =
+    cameraStatus === "unsupported"
+      ? t("camera.unsupported")
+      : cameraStatus === "insecure"
+        ? t("camera.insecure")
+        : "";
+  syncControls();
+}
+
+/** Rebuilt after permission, because that is when the labels arrive. */
+function refreshCameraDevices(): void {
+  const select = need<HTMLSelectElement>("cameraDevice");
+  select.replaceChildren();
+  cameraDevices.forEach((device, i) => {
+    const option = document.createElement("option");
+    option.value = device.deviceId;
+    // A browser hands back an empty label for a camera it has not been given
+    // permission to name. Numbering it is the only honest fallback — inventing
+    // "Built-in camera" would be a guess presented as a fact.
+    option.textContent = device.label || t("camera.unnamed", { n: i + 1 });
+    select.append(option);
+  });
+  if (camera) select.value = camera.settings.deviceId;
+}
+
+/** **This is the call that prompts.** Reachable only from the button that says so. */
+async function openCamera(deviceId?: string): Promise<void> {
+  const status = need<HTMLParagraphElement>("cameraStatus");
+  status.textContent = t("camera.opening");
+  try {
+    const opened = await cameraApi.open({
+      deviceId,
+      facing: deviceId ? undefined : "user",
+      width: 1280,
+      height: 720,
+    });
+
+    // A file source and a camera are alternatives, not layers. Whichever was
+    // loaded goes before the stream is attached, or the preview would keep
+    // drawing the old one while the camera warmed up.
+    if (playing) togglePlay();
+    if (player.src) {
+      URL.revokeObjectURL(player.src);
+      player.removeAttribute("src");
+      player.load();
+    }
+    video = null;
+    cameraApi.stop(camera?.stream ?? null);
+
+    camera = opened;
+    cameraStatus = "granted";
+    cameraEl.srcObject = opened.stream;
+    await cameraEl.play();
+    cameraOpenedAt = performance.now();
+
+    // The track ending is not something this app can prevent — the camera can
+    // be unplugged, or another application can take it — and without this the
+    // preview simply freezes with every control still claiming to be live.
+    for (const track of opened.stream.getVideoTracks()) {
+      track.addEventListener("ended", () => {
+        if (camera?.stream === opened.stream) {
+          void closeCamera();
+          need<HTMLParagraphElement>("cameraStatus").textContent = t("camera.ended");
+        }
+      });
+    }
+
+    // Now that permission exists the labels do too, so the menu is worth having.
+    cameraDevices = await cameraApi.cameras();
+    refreshCameraDevices();
+
+    // Error diffusion rewrites its whole error field when one pixel moves, so
+    // it crawls on anything live. The same reason a video opens on blue noise.
+    if (params.resolve(0).algorithm in KERNELS) {
+      need<HTMLSelectElement>("algorithm").value = "blue-noise";
+      commit({ algorithm: "blue-noise" });
+    }
+
+    empty.hidden = true;
+    canvas.hidden = false;
+    frame.hidden = false;
+    status.textContent = t("camera.live", {
+      label: opened.settings.label || t("camera.unnamed", { n: 1 }),
+      w: opened.settings.width,
+      h: opened.settings.height,
+      fps: Math.round(opened.settings.frameRate),
+    });
+    syncControls();
+    syncStillClock();
+    cameraPump();
+  } catch (error) {
+    // Every awaited user action needs a catch that puts the reason on screen —
+    // and a refused prompt is the single most likely outcome here, so it gets
+    // the sentence that says how to undo it rather than a DOMException name.
+    cameraStatus = await cameraApi.status();
+    status.textContent = t("camera.failed", { reason: cameraApi.explain(error) });
+    syncControls();
+  }
+}
+
+/**
+ * Stops the hardware and, if a take was running, saves it rather than throwing
+ * it away. Losing a recording to pressing the wrong button is not a trade this
+ * should be making on the user's behalf.
+ */
+async function closeCamera(): Promise<void> {
+  if (recorder) await stopRecording();
+  cameraApi.stop(camera?.stream ?? null);
+  camera = null;
+  cameraEl.srcObject = null;
+  if (!bitmap) {
+    empty.hidden = false;
+    canvas.hidden = true;
+    frame.hidden = true;
+  }
+  syncControls();
+  syncStillClock();
+  draw();
+}
+
+/**
+ * One render per camera frame, and one recorded frame per render.
+ *
+ * `requestVideoFrameCallback` fires when a frame has actually been presented,
+ * which is the only signal that means "there is something new to draw" — a rAF
+ * loop against a 30 fps camera on a 120 Hz display renders the same frame four
+ * times, and would record it four times too.
+ */
+function cameraPump(): void {
+  if (!camera) return;
+  draw();
+
+  // The recorder is fed from here rather than from `draw`, because `draw` also
+  // runs on every slider move and would then record a burst of frames at
+  // pointer rate with wall-clock timestamps a millisecond apart.
+  if (recorder && !recordBusy) {
+    recordBusy = true;
+    const take = recorder;
+    const at = (performance.now() - recordStartedAt) / 1000;
+    void take
+      .addFrame(canvas, at)
+      .then((room) => {
+        // Only if this is still the take that is running. Stop clears `recorder`
+        // synchronously and then writes its own line, and a frame that was in
+        // flight when the button was pressed would otherwise land afterwards and
+        // put "Recording…" back over "Saved 61 frames".
+        if (recorder !== take) return;
+        need<HTMLParagraphElement>("cameraStatus").textContent = t("camera.recording", {
+          n: take.frameCount,
+          seconds: Math.round(at * 10) / 10,
+        });
+        // The sink is full. Stopping here is what turns a take that would have
+        // run the tab out of memory into a file the user still gets to keep.
+        if (!room) void stopRecording();
+      })
+      .catch((error: unknown) => {
+        if (recorder !== take) return;
+        need<HTMLParagraphElement>("cameraStatus").textContent = t("camera.recordFailed", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        void stopRecording();
+      })
+      .finally(() => {
+        recordBusy = false;
+      });
+  }
+
+  const withCallback = cameraEl as HTMLVideoElement & {
+    requestVideoFrameCallback?: (cb: () => void) => number;
+  };
+  if (withCallback.requestVideoFrameCallback) withCallback.requestVideoFrameCallback(cameraPump);
+  else requestAnimationFrame(cameraPump);
+}
+
+async function startRecording(): Promise<void> {
+  if (!camera || recorder) return;
+  const status = need<HTMLParagraphElement>("cameraStatus");
+  try {
+    recorder = await Recorder.start({
+      format: animFormat,
+      // The canvas, not the camera: the renderer sizes its output from the
+      // source, so these agree — but the canvas is what the frames are actually
+      // read from, and sizing the encoder from anything else is how an export
+      // comes back a different shape than the preview.
+      width: canvas.width,
+      height: canvas.height,
+      fps: Math.round(camera.settings.frameRate) || 30,
+      gifFps,
+    });
+    recordStartedAt = performance.now();
+    status.textContent = t("camera.recording", { n: 0, seconds: 0 });
+  } catch (error) {
+    recorder = null;
+    status.textContent = t("camera.recordFailed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+  syncControls();
+}
+
+async function stopRecording(): Promise<void> {
+  const running = recorder;
+  if (!running) return;
+  // Cleared before the await, so the pump stops feeding it while it finishes.
+  recorder = null;
+  syncControls();
+
+  const status = need<HTMLParagraphElement>("cameraStatus");
+  try {
+    const result = await running.finish();
+    download(result.blob, `dhaka-camera.${result.container}`);
+    status.textContent =
+      t("camera.recorded", {
+        n: result.frames,
+        seconds: Math.round(result.duration * 10) / 10,
+      }) + describeRecording(result);
+  } catch (error) {
+    status.textContent = t("camera.recordFailed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * The caveats a finished take carries, as whole sentences joined by spaces.
+ *
+ * All three are things the user cannot see by looking at the file and would
+ * otherwise discover later: a GIF that plays slower than it was recorded, one
+ * whose colours were approximated, and a take that was cut short by the size
+ * ceiling rather than by the button.
+ */
+function describeRecording(result: RecordResult): string {
+  const parts: string[] = [];
+  if (result.gifFps !== null) {
+    parts.push(t("export.gifRealFps", { n: Math.round(result.gifFps * 10) / 10 }));
+  }
+  if (result.approximated) parts.push(t("export.gifApproximated"));
+  if (result.hitLimit) parts.push(t("camera.recordLimit"));
+  return parts.length === 0 ? "" : " " + parts.join(" ");
+}
+
+/**
+ * A still's animation, rendered offline into a video or a GIF.
+ *
+ * Offline rather than recorded off the preview: `t` comes from the frame index,
+ * so the file is the animation at a true constant rate rather than at whatever
+ * rate this machine managed to repaint, and two exports of the same settings
+ * are the same file.
+ */
+async function runAnimationExport(): Promise<void> {
+  const source = currentSource();
+  if (!source || !pipeline || !gpu || animating) return;
+  const run = new AbortController();
+  animating = run;
+  syncControls();
+
+  const status = need<HTMLParagraphElement>("animationStatus");
+  // Its own pipelines, for the reason the video export gives: sharing the
+  // preview's makes the two resize each other's scratch buffers every frame.
+  const cpu = new StillPipeline(blueNoise!);
+  const own = new GpuPipeline(document.createElement("canvas"), blueNoise!);
+  const plan = animationPlan(params.resolve(0));
+  // Rendering 30 fps for a GIF that can only hold 12.5 would throw away more
+  // than half the work before writing a byte.
+  const fps = animFormat === "gif" ? gifFps : 30;
+
+  try {
+    const result = await exportAnimation({
+      source,
+      params,
+      text: textSource,
+      cpu,
+      gpu: own,
+      format: animFormat,
+      fps,
+      seconds: plan.seconds,
+      gifFps,
+      signal: run.signal,
+      onProgress: (n, total) => {
+        status.textContent = t("export.animationProgress", { n, total });
+      },
+    });
+
+    download(result.blob, `dhaka-animation.${result.container}`);
+    // A cancelled export still hands back the frames it managed, the way the
+    // pixel ladder hands back a partial zip. Saying so is the difference
+    // between a short file and a file that looks like it failed silently.
+    status.textContent =
+      (run.signal.aborted ? t("export.animationStopped") + " " : "") +
+      t("export.animationDone", {
+        n: result.frames,
+        seconds: Math.round(result.duration * 100) / 100,
+      }) +
+      describeRecording(result);
+  } catch (error) {
+    // Without this the whole export fails as an unhandled rejection: no file,
+    // no message, nothing on screen to say anything went wrong.
+    status.textContent = t("export.animationFailed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    animating = null;
+    syncControls();
+  }
+}
+
+/** What an animated export is about to cut, said before it is pressed. */
+function showAnimationPlan(): void {
+  const note = document.getElementById("animationPlan");
+  if (!note) return;
+  const plan = animationPlan(params.resolve(0));
+  const seconds = Math.round(plan.seconds * 100) / 100;
+  if (!plan.seamless) {
+    note.textContent = t("export.animationNoLoop", { seconds });
+    return;
+  }
+  // A fast field loops many times inside one export, and calling that "one full
+  // loop" is simply wrong — at speed 2 a ripple repeats every half second, so
+  // four seconds is eight of them. The count is worth saying: it is what makes
+  // the duration look chosen rather than arbitrary.
+  note.textContent =
+    plan.repeats === 1
+      ? t("export.animationLoops", { seconds })
+      : t("export.animationRepeats", {
+          seconds,
+          n: plan.repeats,
+          period: Math.round((plan.period ?? 0) * 100) / 100,
+        });
 }
 
 /**
@@ -940,11 +1425,22 @@ function download(blob: Blob, name: string): void {
 }
 
 async function exportPng(): Promise<void> {
-  if (!bitmap || !pipeline) return;
+  const source = currentSource();
+  if (!source || !pipeline) return;
+
+  // The **current** frame, not the stored bitmap.
+  //
+  // `bitmap` is the still, and for a video it is the first frame — so exporting
+  // from it handed back the opening frame of a clip the user had scrubbed
+  // somewhere else, and once the camera existed it handed back whichever photo
+  // happened to be loaded before, or nothing at all. What is on screen is the
+  // only defensible thing for this button to save, which also means resolving
+  // at the clock the preview is drawing on rather than at zero.
+  const at = currentTime();
 
   // Render into a throwaway canvas so the preview is not resized under the user.
   const full = document.createElement("canvas");
-  pipeline.render(bitmap, params.resolve(0), textSource, full, exportScale);
+  pipeline.render(source, params.resolve(at), textSource, full, exportScale, at);
 
   const blob = await new Promise<Blob | null>((resolve) => full.toBlob(resolve, "image/png"));
   if (!blob) throw new Error("could not encode the PNG");
@@ -970,7 +1466,8 @@ let ladderRunning = false;
 let ladderCancelled = false;
 
 async function exportPixelLadder(): Promise<void> {
-  if (!bitmap || !pipeline || ladderRunning) return;
+  const source = currentSource();
+  if (!source || !pipeline || ladderRunning) return;
   ladderRunning = true;
   ladderCancelled = false;
   syncControls();
@@ -988,7 +1485,7 @@ async function exportPixelLadder(): Promise<void> {
   // One instant for the whole run. Reading the preview clock per render would
   // advance an animation between files, so the ladder would show pixel size
   // *and* time changing and prove nothing about either.
-  const at = video ? player.currentTime : stillTime;
+  const at = currentTime();
   // A copy, never the borrowed set: mutating that would drive the live UI.
   const base = { ...params.resolve(at) };
 
@@ -998,7 +1495,7 @@ async function exportPixelLadder(): Promise<void> {
   // out of 64 on a modest photo, which is not "every level", it is the same
   // level under several names. The grid is asked for rather than guessed, from
   // the one function the renderer itself uses.
-  const { w: srcW, h: srcH } = sourceSize(bitmap);
+  const { w: srcW, h: srcH } = sourceSize(source);
   const wanted: number[] = [];
   let lastGrid = "";
   for (const size of sizes) {
@@ -1023,7 +1520,7 @@ async function exportPixelLadder(): Promise<void> {
       // 64 renders of a large photo is long enough to look frozen otherwise.
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      ladderPipeline.render(bitmap, { ...base, pixelSize: size }, textSource, target, exportScale, at);
+      ladderPipeline.render(source, { ...base, pixelSize: size }, textSource, target, exportScale, at);
       const blob = await new Promise<Blob | null>((resolve) =>
         target.toBlob(resolve, "image/png"),
       );
@@ -1328,6 +1825,56 @@ bindColor("halftonePaper");
 scaleSelect.addEventListener("change", () => {
   exportScale = Number(scaleSelect.value);
 });
+
+/**
+ * The frame rates a GIF can actually hold.
+ *
+ * Not a free number, and not a slider: a GIF delay is a whole number of
+ * hundredths of a second, so 15 fps does not exist — it rounds to a delay of 7
+ * and plays at 14.3. Offering only the rates that divide 100 means the number
+ * on the control is the number the file plays at, which is the only reason to
+ * put a number on a control at all.
+ */
+const GIF_RATES = [10, 12.5, 20, 25, 50];
+
+function refreshGifRates(): void {
+  const select = need<HTMLSelectElement>("gifFps");
+  select.replaceChildren();
+  for (const rate of GIF_RATES) {
+    const option = document.createElement("option");
+    option.value = String(rate);
+    option.textContent = t("export.gifRate", { n: rate });
+    select.append(option);
+  }
+  select.value = String(gifFps);
+}
+refreshers.push(refreshGifRates);
+
+need<HTMLSelectElement>("gifFps").addEventListener("change", (event) => {
+  gifFps = Number((event.target as HTMLSelectElement).value);
+});
+
+need<HTMLSelectElement>("animFormat").addEventListener("change", (event) => {
+  animFormat = (event.target as HTMLSelectElement).value as RecordFormat;
+  syncControls();
+});
+
+need<HTMLButtonElement>("useCamera").addEventListener("click", () => void chooseCamera());
+need<HTMLButtonElement>("cameraAllow").addEventListener("click", () => void openCamera());
+need<HTMLButtonElement>("cameraOff").addEventListener("click", () => void closeCamera());
+need<HTMLSelectElement>("cameraDevice").addEventListener("change", (event) => {
+  // Switching camera is a fresh `getUserMedia` against a specific device id.
+  // Permission is already granted at this point, so it does not prompt again.
+  void openCamera((event.target as HTMLSelectElement).value);
+});
+need<HTMLInputElement>("cameraMirror").addEventListener("change", (event) => {
+  mirror = (event.target as HTMLInputElement).checked;
+  draw();
+});
+need<HTMLButtonElement>("record").addEventListener("click", () => void startRecording());
+need<HTMLButtonElement>("stopRecord").addEventListener("click", () => void stopRecording());
+need<HTMLButtonElement>("exportAnimation").addEventListener("click", () => void runAnimationExport());
+need<HTMLButtonElement>("cancelAnimation").addEventListener("click", () => animating?.abort());
 
 need<HTMLButtonElement>("pick").addEventListener("click", () => fileInput.click());
 need<HTMLButtonElement>("export").addEventListener("click", () => void exportPng());
