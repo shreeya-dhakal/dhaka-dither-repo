@@ -177,6 +177,18 @@ function cameraFrame(): HTMLVideoElement | HTMLCanvasElement {
 
 /** Seconds since the camera opened. A live stream has no `currentTime` worth reading. */
 let cameraOpenedAt = 0;
+/** Frames the camera pump has actually drawn. The watchdog below reads it. */
+let cameraFrames = 0;
+/**
+ * Set when `requestVideoFrameCallback` has been given up on.
+ *
+ * It is the right callback — it fires once per *presented* frame, so it never
+ * renders the same frame twice — but it is tied to compositing, and this
+ * element is deliberately not in the document. Where that combination does not
+ * fire, the preview sits blank forever and nothing on screen says why. The
+ * fallback is an ordinary animation frame, which always fires.
+ */
+let cameraRaf = false;
 function cameraTime(): number {
   return (performance.now() - cameraOpenedAt) / 1000;
 }
@@ -1104,12 +1116,7 @@ async function openCamera(deviceId?: string): Promise<void> {
   const status = need<HTMLParagraphElement>("cameraStatus");
   status.textContent = t("camera.opening");
   try {
-    const opened = await cameraApi.open({
-      deviceId,
-      facing: deviceId ? undefined : "user",
-      width: 1280,
-      height: 720,
-    });
+    const opened = await cameraApi.open({ deviceId, width: 1280, height: 720 });
 
     // A file source and a camera are alternatives, not layers. Whichever was
     // loaded goes before the stream is attached, or the preview would keep
@@ -1163,15 +1170,54 @@ async function openCamera(deviceId?: string): Promise<void> {
     });
     syncControls();
     syncStillClock();
+    cameraFrames = 0;
+    cameraRaf = false;
     cameraPump();
+    watchForFrames(opened.stream);
   } catch (error) {
     // Every awaited user action needs a catch that puts the reason on screen —
     // and a refused prompt is the single most likely outcome here, so it gets
     // the sentence that says how to undo it rather than a DOMException name.
     cameraStatus = await cameraApi.status();
-    status.textContent = t("camera.failed", { reason: cameraApi.explain(error) });
+    const hint = cameraApi.originHint();
+    status.textContent =
+      t("camera.failed", { reason: cameraApi.explain(error) }) +
+      (hint === null ? "" : " " + t("camera.originHint", { hint }));
     syncControls();
   }
+}
+
+/**
+ * A camera that opened but never produced a picture, caught and named.
+ *
+ * `getUserMedia` resolving is not the same as frames arriving, and the gap
+ * between the two is the worst failure this feature has: the permission light
+ * comes on, every control says the camera is live, and the canvas stays blank
+ * with nothing on screen accounting for it. Two escalating steps — try the
+ * other callback, then say so — turn that into either a working preview or a
+ * sentence.
+ */
+function watchForFrames(stream: MediaStream): void {
+  const mine = () => camera?.stream === stream;
+  const status = need<HTMLParagraphElement>("cameraStatus");
+
+  setTimeout(() => {
+    if (!mine() || cameraFrames > 0 || cameraRaf) return;
+    // `requestVideoFrameCallback` is tied to compositing and this element is
+    // not in the document. Where that stops it firing, an animation frame does
+    // not care.
+    cameraRaf = true;
+    requestAnimationFrame(cameraPump);
+  }, 1200);
+
+  setTimeout(() => {
+    if (!mine() || cameraFrames > 0) return;
+    const track = stream.getVideoTracks()[0];
+    status.textContent = t("camera.noFrames", {
+      state: track ? `${track.readyState}${track.muted ? ", muted" : ""}` : "no track",
+      ready: cameraEl.readyState,
+    });
+  }, 4000);
 }
 
 /**
@@ -1204,6 +1250,7 @@ async function closeCamera(): Promise<void> {
  */
 function cameraPump(): void {
   if (!camera) return;
+  if (cameraEl.readyState >= 2) cameraFrames++;
   draw();
 
   // The recorder is fed from here rather than from `draw`, because `draw` also
@@ -1244,8 +1291,11 @@ function cameraPump(): void {
   const withCallback = cameraEl as HTMLVideoElement & {
     requestVideoFrameCallback?: (cb: () => void) => number;
   };
-  if (withCallback.requestVideoFrameCallback) withCallback.requestVideoFrameCallback(cameraPump);
-  else requestAnimationFrame(cameraPump);
+  if (!cameraRaf && withCallback.requestVideoFrameCallback) {
+    withCallback.requestVideoFrameCallback(cameraPump);
+  } else {
+    requestAnimationFrame(cameraPump);
+  }
 }
 
 async function startRecording(): Promise<void> {

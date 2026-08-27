@@ -28,9 +28,7 @@ export type CameraStatus =
   | "prompt";
 
 export interface CameraFacing {
-  /** `user` is the selfie camera, `environment` the rear one. Ignored when a device id is given. */
-  facing?: "user" | "environment";
-  /** A specific camera from `cameras()`. Wins over `facing`. */
+  /** A specific camera from `cameras()`. Omit for whichever one the browser picks. */
   deviceId?: string;
   /** Asked for, never insisted on — a camera that cannot do it picks its own nearest size. */
   width?: number;
@@ -136,9 +134,65 @@ export function explain(error: unknown): string {
       return "this camera cannot produce the requested size";
     case "AbortError":
       return "the camera stopped before it started";
+    case "NotSupportedError":
+      // Chromium raises this where there is no camera device at all, and its
+      // own message is the two words "Not supported", which sends the reader
+      // looking for a browser problem rather than a missing camera.
+      return "this browser would not open a camera here — there may be no camera attached, or the page may not be on https or localhost";
+    case "TypeError":
+      return "the camera request was malformed, which is a bug in this page rather than anything you did";
     default:
-      return error instanceof Error ? error.message : String(error);
+      break;
   }
+  // A `TypeError` from `getUserMedia` is a plain Error, not a DOMException, so
+  // it never reaches the switch above.
+  if (error instanceof TypeError) {
+    return "the camera request was malformed, which is a bug in this page rather than anything you did";
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  // Never hand back an empty string: an empty reason renders as a sentence with
+  // a hole in it, which reads as the app having nothing to say about its own
+  // failure.
+  return message.trim() === "" ? "the browser gave no reason" : message;
+}
+
+/**
+ * An extra sentence for failures that are really about *where the page is
+ * served from*, or null when the origin is not the suspect.
+ *
+ * Chrome and Firefox treat `http://localhost` as trustworthy and will open a
+ * camera on it, which is why `npm run dev` works in them. **Safari will not** —
+ * it requires https for `getUserMedia` even on localhost — and it reports
+ * `isSecureContext === true` there anyway, so the check in `status` cannot see
+ * it coming and the failure arrives as an ordinary permission error. That is a
+ * long time to spend suspecting your webcam, so the origin is named whenever
+ * the page is not on https.
+ */
+export function originHint(): string | null {
+  if (typeof location === "undefined" || location.protocol === "https:") return null;
+  return "this page is on http rather than https — Chrome and Firefox allow a camera on localhost, but Safari requires https even there";
+}
+
+/**
+ * Whether a failed request is worth retrying **without** the size and device
+ * constraints.
+ *
+ * A refusal is deliberately not on this list. Retrying a `NotAllowedError`
+ * would raise a second prompt immediately after the user declined the first,
+ * which is the behaviour that teaches people to block a site permanently.
+ */
+function worthRetryingUnconstrained(error: unknown): boolean {
+  const name = error instanceof DOMException ? error.name : "";
+  return (
+    name === "OverconstrainedError" ||
+    name === "NotFoundError" ||
+    name === "DevicesNotFoundError" ||
+    name === "NotReadableError" ||
+    name === "TrackStartError" ||
+    name === "NotSupportedError" ||
+    name === "TypeError" ||
+    error instanceof TypeError
+  );
 }
 
 /**
@@ -161,15 +215,34 @@ export async function open(options: CameraFacing = {}): Promise<OpenCamera> {
 
   const video: MediaTrackConstraints = {};
   if (options.deviceId) video.deviceId = { exact: options.deviceId };
-  else if (options.facing) video.facingMode = options.facing;
   // `ideal`, never `exact`: a webcam that cannot do 1280×720 should hand back
   // whatever it can rather than raise `OverconstrainedError`. The size that
   // actually arrived is read back off the track below and is the only one the
   // rest of the app uses.
+  //
+  // `facingMode` is not asked for at all. It is a phone idea — there is no
+  // front or back camera on a laptop — and a desktop webcam that reports no
+  // facing at all is one more way for a request to come back empty-handed for
+  // no benefit. A specific camera is chosen by device id or not at all.
   if (options.width) video.width = { ideal: options.width };
   if (options.height) video.height = { ideal: options.height };
 
-  const stream = await devices.getUserMedia({ video: Object.keys(video).length ? video : true });
+  const constrained = Object.keys(video).length > 0;
+  let stream: MediaStream;
+  try {
+    stream = await devices.getUserMedia({ video: constrained ? video : true });
+  } catch (error) {
+    // A camera that cannot meet the request should still open.
+    //
+    // Every constraint here is a preference — a size hint, or a device id that
+    // may name a camera that has since been unplugged — and none of them is
+    // worth failing over. Losing the whole feature because a webcam would not
+    // do 720p is the worst possible trade, and it is invisible from the error,
+    // which says only "Not supported".
+    if (!constrained || !worthRetryingUnconstrained(error)) throw error;
+    stream = await devices.getUserMedia({ video: true });
+  }
+
   const track = stream.getVideoTracks()[0];
   if (!track) {
     stop(stream);

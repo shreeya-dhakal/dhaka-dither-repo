@@ -169,6 +169,9 @@ export const en = {
   "camera.unsupported": "This browser does not offer a camera to a web page.",
   "camera.insecure":
     "A camera is only offered over https or on localhost. This page was opened another way, so the browser will not hand one over.",
+  "camera.originHint": "Also worth knowing: {hint}.",
+  "camera.noFrames":
+    "The camera opened but has sent no picture. The track says \"{state}\" and the player is at readyState {ready}. On macOS this is usually the system camera permission rather than the browser's: check System Settings → Privacy & Security → Camera. Closing any other app using the camera also fixes it.",
   "camera.ended": "The camera stopped — it was unplugged, or another app took it.",
   "camera.recording": "Recording — {n} frames, {seconds} s",
   "camera.recorded": "Saved {n} frames, {seconds} s.",
