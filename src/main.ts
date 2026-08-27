@@ -142,9 +142,26 @@ let playing = false;
  * so this is belt and braces.
  */
 const cameraEl = document.createElement("video");
+cameraEl.id = "cameraFeed";
 cameraEl.muted = true;
 cameraEl.playsInline = true;
 cameraEl.autoplay = true;
+/**
+ * In the document, not detached — and that is a requirement rather than tidying.
+ *
+ * The file player above gets away with being detached because it is driven by
+ * `src`, which browsers decode regardless. A `srcObject` carrying a live stream
+ * is not the same case: whether a detached element decodes one at all is
+ * genuinely inconsistent between browsers, and where it does not, `readyState`
+ * never reaches 2, `videoWidth` stays 0, and the preview is blank while the
+ * camera light is on and every control says it is live. That is the worst
+ * symptom this feature has, and attaching the element removes the whole class.
+ *
+ * It is styled to one nearly-transparent pixel out of flow rather than
+ * `display: none`, because `display: none` stops the element being composited,
+ * which is the thing being fixed.
+ */
+document.body.append(cameraEl);
 
 /** Where a mirrored frame is drawn. Reused, because it is written every frame. */
 const mirrorCanvas = document.createElement("canvas");
@@ -243,7 +260,13 @@ let exportScale = 1;
  * the 2D path and the GL upload.
  */
 function currentSource(): ImageBitmap | HTMLVideoElement | HTMLCanvasElement | null {
-  if (camera && cameraEl.readyState >= 2) return cameraFrame();
+  // Either signal will do. `readyState >= 2` is the strict "a frame is
+  // available" test, but a browser can report dimensions and paint perfectly
+  // well while holding readyState lower for a live stream — and gating on the
+  // strict test alone means a blank canvas forever with no error anywhere.
+  // Drawing a frame that has not arrived costs a transparent blit and fixes
+  // itself on the next one.
+  if (camera && (cameraEl.readyState >= 2 || cameraEl.videoWidth > 0)) return cameraFrame();
   if (video && player.readyState >= 2) return player;
   return bitmap;
 }
@@ -1115,8 +1138,18 @@ function refreshCameraDevices(): void {
 async function openCamera(deviceId?: string): Promise<void> {
   const status = need<HTMLParagraphElement>("cameraStatus");
   status.textContent = t("camera.opening");
+  /**
+   * Held outside the `try` so the catch can release it.
+   *
+   * Everything after `getUserMedia` can still fail — `play()` most of all — and
+   * without this the stream stayed live on the way out: the indicator light on,
+   * an error on screen, and no button anywhere that would turn it off, because
+   * the controls that do are hidden while the camera is not considered open.
+   */
+  let acquired: MediaStream | null = null;
   try {
     const opened = await cameraApi.open({ deviceId, width: 1280, height: 720 });
+    acquired = opened.stream;
 
     // A file source and a camera are alternatives, not layers. Whichever was
     // loaded goes before the stream is attached, or the preview would keep
@@ -1133,7 +1166,12 @@ async function openCamera(deviceId?: string): Promise<void> {
     camera = opened;
     cameraStatus = "granted";
     cameraEl.srcObject = opened.stream;
-    await cameraEl.play();
+    // Not fatal. `play()` rejects for reasons that have nothing to do with
+    // whether frames will arrive — an autoplay policy, a race with `srcObject`
+    // being assigned — and the element often goes on to paint anyway. Losing an
+    // otherwise working camera to it would be the wrong trade; the watchdog
+    // below is what decides whether this actually worked.
+    await cameraEl.play().catch(() => undefined);
     cameraOpenedAt = performance.now();
 
     // The track ending is not something this app can prevent — the camera can
@@ -1178,6 +1216,9 @@ async function openCamera(deviceId?: string): Promise<void> {
     // Every awaited user action needs a catch that puts the reason on screen —
     // and a refused prompt is the single most likely outcome here, so it gets
     // the sentence that says how to undo it rather than a DOMException name.
+    if (camera?.stream !== acquired) cameraApi.stop(acquired);
+    camera = null;
+    cameraEl.srcObject = null;
     cameraStatus = await cameraApi.status();
     const hint = cameraApi.originHint();
     status.textContent =
@@ -1250,7 +1291,7 @@ async function closeCamera(): Promise<void> {
  */
 function cameraPump(): void {
   if (!camera) return;
-  if (cameraEl.readyState >= 2) cameraFrames++;
+  if (cameraEl.readyState >= 2 || cameraEl.videoWidth > 0) cameraFrames++;
   draw();
 
   // The recorder is fed from here rather than from `draw`, because `draw` also

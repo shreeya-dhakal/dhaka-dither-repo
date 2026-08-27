@@ -248,6 +248,19 @@
       #stage {
         background: var(--paper);
       }
+      /* The camera's own element, which has to be in the document to be
+         decoded reliably — see the note beside it in main.ts. One pixel, out
+         of flow, and just opaque enough to be painted. `display: none` would
+         stop it being composited, which is the thing this avoids. */
+      #cameraFeed {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 1px;
+        height: 1px;
+        opacity: 0.01;
+        pointer-events: none;
+      }
       :focus-visible {
         outline: 3px solid var(--ink);
         outline-offset: 2px;
