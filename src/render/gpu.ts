@@ -9,9 +9,10 @@
 
 import { bayerMatrix, type BayerSize } from "../core/bayer.ts";
 import { MOTION_IDS } from "../core/motion.ts";
-import { measureAll } from "../glyph/density.ts";
-import { buildAtlas, flowToTexture, MAX_GLYPHS, rampToAtlas, type GlyphAtlas } from "../glyph/atlas.ts";
-import { layoutFlow, type FlowLayout } from "../glyph/layout.ts";
+import { measureAdvance, measureAll } from "../glyph/density.ts";
+import { buildAtlas, flowMapTexture, flowToTexture, MAX_GLYPHS, rampToAtlas, type GlyphAtlas } from "../glyph/atlas.ts";
+import { FLOW_FONT_SCALE } from "./text.ts";
+import { layoutFlow, layoutProportional, type FlowLayout, type ProportionalLayout } from "../glyph/layout.ts";
 import { buildRamp } from "../glyph/ramp.ts";
 import { segmentWords, uniqueClusters } from "../glyph/segment.ts";
 import type { ParamSet } from "../params.ts";
@@ -19,6 +20,13 @@ import type { TextSource } from "../text.ts";
 import { GlSurface } from "./gl.ts";
 
 export const BLUE_NOISE_SIZE = 64;
+
+/**
+ * Horizontal samples per cell in the proportional lookup. Must exceed the
+ * narrowest advance or a glyph falls between two texels and disappears;
+ * Devanagari's narrowest cluster is about half a cell, so this leaves four.
+ */
+const FLOW_SAMPLES = 8;
 
 /** Which algorithms this path implements. Anything else belongs to the CPU. */
 export function gpuSupports(algorithm: string): boolean {
@@ -34,6 +42,7 @@ export interface TextArt {
   /** Ordered darkest-first for ramp; the layout's own cluster list for flow. */
   ramp: readonly string[];
   flow?: FlowLayout;
+  proportional?: ProportionalLayout;
   fontFamily: string;
   /** Bumped by `TextSource`; the atlas is rebuilt only when this changes. */
   version: number;
@@ -90,6 +99,9 @@ uniform sampler2D uAtlas;     // one sheet of rasterized clusters
 uniform sampler2D uCells;     // flow only: which atlas cell goes where
 uniform sampler2D uWordEnd;   // flow only: 1 where a cell ends a word
 uniform sampler2D uGlyphHalf; // half of each slot's ink width, doubled into 0..1
+uniform sampler2D uFlowMap;   // proportional flow: slot, offset-into-glyph, width
+uniform float uFlowSamples;   // uFlowMap texels per cell, horizontally
+uniform float uProportional;  // 1 when flow is packed by measured advance
 uniform float uAtlasGrid;     // cells across the sheet
 uniform float uAtlasCell;     // a cell's side as a fraction of the sheet
 uniform float uRank[32];      // ramp only: density rank -> atlas cell
@@ -235,24 +247,48 @@ vec3 hueTint(vec3 c, vec3 ink) {
  */
 float glyphInk(vec2 cellCoord, vec2 local, float level) {
   float slot;
+  vec2 within = local;
+  bool proportional = false;
   if (iText == 1) {
     // Ramp: the block's own tone picks which cluster is drawn.
     slot = uRank[int(clamp(level, 0.0, 31.0))];
+  } else if (uProportional > 0.5) {
+    // Proportional flow. A fragment can no longer divide its way to a glyph,
+    // because advances vary, so the CPU bakes a position lookup and this is one
+    // fetch into it — the same cost as the column lookup it replaces.
+    //
+    // Each texel carries the offset from ITS OWN glyph's left edge rather than
+    // that glyph's absolute position. An absolute start would need to span the
+    // whole row, and at a fine pixel size the row is thousands of cells, which
+    // overflows the two bytes available. An offset is bounded by one glyph.
+    proportional = true;
+    float xCell = cellCoord.x + local.x;
+    vec4 e = texture(uFlowMap, vec2(xCell / uGrid.x, (cellCoord.y + 0.5) / uGrid.y));
+    float packed = e.r * 255.0;
+    slot = packed > 254.5 ? -1.0 : packed;
+    float offset = (e.g * 255.0 * 256.0 + e.b * 255.0) / 256.0;
+    float gw = e.a * 255.0 / 64.0;
+    // Distance from the glyph's left edge: how far into this texel the fragment
+    // sits, plus how far the texel already was into the glyph. Exact, so the
+    // sample does not stair-step at the texel boundaries.
+    float texelX = floor(xCell * uFlowSamples) / uFlowSamples;
+    float into = (xCell - texelX) + offset;
+    within.x = gw > 0.0001 ? clamp(into / gw, 0.0, 1.0) : 0.5;
   } else {
-    // Flow: the layout already decided, and wrapping is sequential, so it
-    // arrives as a data texture rather than being derived per fragment.
+    // Flow on the fixed lattice: the layout already decided, and wrapping is
+    // sequential, so it arrives as a data texture rather than derived per
+    // fragment.
     float packed = texture(uCells, (cellCoord + 0.5) / uGrid).r * 255.0;
     slot = packed > 254.5 ? -1.0 : packed;
   }
   if (slot < 0.0) return 0.0;
 
-  vec2 within = local;
   // How much of its cell this glyph occupies, and so how far it may move.
   // Doubled on the way in, so undo that here.
   float col0 = mod(slot, uAtlasGrid);
   float row0 = floor(slot / uAtlasGrid);
   float inkHalf = texture(uGlyphHalf, (vec2(col0, row0) + 0.5) / uAtlasGrid).r * 0.5;
-  if (iText == 2 && uWordGap > 0.0) {
+  if (iText == 2 && uWordGap > 0.0 && !proportional) {
     // The same fractional word break the Canvas path opens: the glyph ending a
     // word slides left, the one starting the next slides right. Sampling the
     // neighbour rather than carrying a second flag, because the texture is
@@ -407,16 +443,21 @@ export function textArtFor(
   if (!GpuPipeline.canDrawText(clusters)) return null;
 
   if (params.text === "flow") {
-    const flow = layoutFlow(
-      segmentWords(clusters.join("")),
-      cols,
-      rows,
-      {
-        keepWords: params.flowKeepWords,
-        fit: params.flowFit,
-      },
+    const tokens = segmentWords(clusters.join(""));
+    const options = { keepWords: params.flowKeepWords, fit: params.flowFit };
+    const flow = layoutFlow(tokens, cols, rows, options);
+    if (params.debugFixedWidthCells) {
+      return { mode: "flow", ramp: [], flow, fontFamily, version: text.version };
+    }
+    // The same measurement the Canvas path packs with, and it has to be the
+    // same or the two paths lay the text out differently — which is the drift
+    // this whole lookup exists to avoid.
+    const proportional = layoutProportional(tokens, cols, rows, options, (cluster) =>
+      cluster.trim() === ""
+        ? measureAdvance(" ", fontFamily) * FLOW_FONT_SCALE + params.flowWordGap
+        : measureAdvance(cluster, fontFamily) * FLOW_FONT_SCALE,
     );
-    return { mode: "flow", ramp: [], flow, fontFamily, version: text.version };
+    return { mode: "flow", ramp: [], flow, proportional, fontFamily, version: text.version };
   }
 
   const measured = measureAll(
@@ -440,6 +481,7 @@ export class GpuPipeline {
   private atlas: { key: string; sheet: GlyphAtlas; texture: WebGLTexture; halfInk: WebGLTexture } | null = null;
   private cellsTexture: WebGLTexture | null = null;
   private wordEndTexture: WebGLTexture | null = null;
+  private flowMap: WebGLTexture | null = null;
   private blankTexture: WebGLTexture | null = null;
   private sourceTexture: WebGLTexture | null = null;
   /** Public so the video exporter can hand the drawn surface straight to `VideoFrame`. */
@@ -548,6 +590,9 @@ export class GpuPipeline {
     let cellsTexture = this.blankTexture;
     let wordEndTexture = this.blankTexture;
     let halfInkTexture = this.blankTexture;
+    let flowMap = this.blankTexture;
+    let flowSamples = 1;
+    let proportional = 0;
     let atlasGrid = 1;
     let atlasCell = 1;
     let ranks = new Float32Array(32);
@@ -570,9 +615,19 @@ export class GpuPipeline {
         this.wordEndTexture = this.surface.maskTexture(ends, cols, rows, false, this.wordEndTexture);
         wordEndTexture = this.wordEndTexture;
       }
+      if (text.proportional) {
+        flowSamples = FLOW_SAMPLES;
+        const map = flowMapTexture(
+          text.proportional.placements, text.proportional.clusters, sheet,
+          cols, rows, FLOW_SAMPLES,
+        );
+        this.flowMap = this.surface.rgbaTexture(map, cols * FLOW_SAMPLES, rows, this.flowMap);
+        flowMap = this.flowMap;
+        proportional = 1;
+      }
     }
 
-    this.surface.draw(this.program(params.bayerSize), [texture, this.mask, atlasTexture, cellsTexture, wordEndTexture, halfInkTexture], {
+    this.surface.draw(this.program(params.bayerSize), [texture, this.mask, atlasTexture, cellsTexture, wordEndTexture, halfInkTexture, flowMap], {
       uOutput: [width, height],
       uSource_: [width, height],
       uPixelSize: params.pixelSize,
@@ -601,6 +656,8 @@ export class GpuPipeline {
       uAtlasCell: atlasCell,
       uCellAspect: aspect,
       uGrid: [cols, rows],
+      uFlowSamples: flowSamples,
+      uProportional: proportional,
       uRank: Array.from(ranks),
       iText: text ? (text.mode === "ramp" ? 1 : 2) : 0,
       uFlowSize: params.flowSize,

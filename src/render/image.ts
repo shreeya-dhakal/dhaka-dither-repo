@@ -36,15 +36,15 @@ import { applyTone, levelStep, toLuminance } from "../core/quantize.ts";
 import { akshara } from "../glyph/akshara.ts";
 import { bharatiCells } from "../glyph/bharati.ts";
 import { CELL_COLS, CELL_ROWS, masksToText, packBraille } from "../glyph/braille.ts";
-import { measureAll } from "../glyph/density.ts";
-import { layoutFlow, type FlowLayout } from "../glyph/layout.ts";
+import { measureAdvance, measureAll } from "../glyph/density.ts";
+import { layoutFlow, layoutProportional, type FlowLayout, type ProportionalLayout } from "../glyph/layout.ts";
 import { buildRamp } from "../glyph/ramp.ts";
 import { segmentWords, uniqueClusters } from "../glyph/segment.ts";
 import type { ParamSet, TextFont } from "../params.ts";
 import type { TextSource } from "../text.ts";
 import { colorScreens, paintHalftone } from "./halftone.ts";
 import { paintBraille } from "./braille.ts";
-import { gridToText, paintFlow, paintTextArt } from "./text.ts";
+import { FLOW_FONT_SCALE, gridToText, paintFlow, paintFlowProportional, paintTextArt } from "./text.ts";
 
 export const BLUE_NOISE_SIZE = 64;
 
@@ -194,6 +194,8 @@ export class StillPipeline {
   private cachedRamp: string[] | null = null;
   private rampKey = "";
   private cachedFlow: FlowLayout | null = null;
+  private cachedProportional: ProportionalLayout | null = null;
+  private proportionalKey = "";
   private flowKey = "";
   /** The last text-art grid, kept so "copy as text" returns what is on screen. */
   private lastGrid: { index: Uint8Array; w: number; h: number; ramp: string[] } | null = null;
@@ -589,23 +591,22 @@ export class StillPipeline {
         this.paletteForGrid(rgba, channel, mod, planes, pixels, w, h, params, bias);
         const flow = this.flow(params, text, w, h);
         this.lastGrid = null;
-        paintFlow(
-          flow.cells,
-          flow.wordEnds,
-          flow.clusters,
-          pixels,
-          mod,
-          params.levels,
-          w,
-          h,
-          FONT_STACK[params.textFont],
-          params,
-          target,
-          outW,
-          outH,
-          params.cutLightest ? null : this.levelColor(params, params.levels - 1),
-          this.levelColor(params, 0),
-        );
+        const paperColour = params.cutLightest ? null : this.levelColor(params, params.levels - 1);
+        const inkColour = this.levelColor(params, 0);
+        if (params.debugFixedWidthCells) {
+          paintFlow(
+            flow.cells, flow.wordEnds, flow.clusters, pixels, mod, params.levels,
+            w, h, FONT_STACK[params.textFont], params, target, outW, outH,
+            paperColour, inkColour,
+          );
+        } else {
+          const laid = this.flowProportional(params, text, w, h);
+          paintFlowProportional(
+            laid.placements, laid.clusters, pixels, mod, params.levels,
+            w, h, FONT_STACK[params.textFont], params, target, outW, outH,
+            paperColour, inkColour,
+          );
+        }
         return;
       }
 
@@ -684,6 +685,49 @@ export class StillPipeline {
    * this is CPU work by nature — step 10 uploads exactly this buffer as a data
    * texture rather than deriving it per fragment.
    */
+  /**
+   * Flow packed by measured advance.
+   *
+   * The key carries the **font**, which the fixed-width key did not need:
+   * advances are a property of the face, so the same text at the same grid in a
+   * different font wraps differently. It carries `flowWordGap` too, because
+   * that now widens the space rather than nudging the glyphs either side of it.
+   *
+   * Advance arrives em-relative and is scaled by `FLOW_FONT_SCALE` to reach
+   * cells. That holds because `cellH = cellW * cellAspect` and `cellAspect` is
+   * never below 1, so the font size flow draws at is always `cellW *
+   * FLOW_FONT_SCALE` — the ratio is independent of pixel size, which is what
+   * lets one measurement serve every size.
+   */
+  private flowProportional(
+    params: ParamSet,
+    text: TextSource,
+    w: number,
+    h: number,
+  ): ProportionalLayout {
+    const family = FONT_STACK[params.textFont];
+    const key = `${text.version}:${w}:${h}:${params.flowKeepWords}:${params.flowFit}:${family}:${params.flowWordGap}`;
+    if (this.cachedProportional && key === this.proportionalKey) return this.cachedProportional;
+
+    const laid = layoutProportional(
+      segmentWords(text.at(0).clusters.join("")),
+      w,
+      h,
+      { keepWords: params.flowKeepWords, fit: params.flowFit },
+      // `flowWordGap` survives the move to measured advances with the only
+      // meaning it can still have: extra air beyond the font's own space. On
+      // the fixed lattice it had to be a painter's nudge, because whitespace
+      // occupied no cell and a whole one was far too much room.
+      (cluster) =>
+        cluster.trim() === ""
+          ? measureAdvance(" ", family) * FLOW_FONT_SCALE + params.flowWordGap
+          : measureAdvance(cluster, family) * FLOW_FONT_SCALE,
+    );
+    this.cachedProportional = laid;
+    this.proportionalKey = key;
+    return laid;
+  }
+
   private flow(params: ParamSet, text: TextSource, w: number, h: number): FlowLayout {
     const key = `${text.version}:${w}:${h}:${params.flowKeepWords}:${params.flowFit}`;
     if (this.cachedFlow && key === this.flowKey) return this.cachedFlow;

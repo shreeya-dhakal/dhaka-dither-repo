@@ -9,6 +9,8 @@
  * Needs a canvas, so it stays out of `src/core`.
  */
 
+import type { Placement } from "./layout.ts";
+
 /** Beyond this the atlas grid outgrows what a single 8-bit index can address. */
 export const MAX_GLYPHS = 255;
 
@@ -133,6 +135,60 @@ export function flowToTexture(
     const cluster = which >= 0 ? clusters[which] : undefined;
     const slot = cluster === undefined ? undefined : atlas.indexOf.get(cluster);
     data[i] = slot === undefined ? 255 : slot;
+  }
+  return data;
+}
+
+/**
+ * Proportional flow's position lookup, as an RGBA payload.
+ *
+ * With measured advances a fragment cannot divide its way to a glyph, so the
+ * shader reads this instead — one fetch, the same cost as the column lookup on
+ * the fixed lattice. Sampled `samples` times per cell horizontally, which has
+ * to exceed the narrowest advance or a glyph could fall between two texels and
+ * vanish; Devanagari's narrowest is about half a cell, so 8 leaves four.
+ *
+ * Each texel carries the offset from **its own glyph's** left edge, not that
+ * glyph's absolute position. Absolute would have to span the whole row, and at
+ * a fine pixel size a row is thousands of cells — past what two bytes hold at
+ * useful precision. An offset is bounded by one glyph's width whatever the grid.
+ *
+ *   R      atlas slot, 255 for empty
+ *   G, B   offset into the glyph, 16-bit, in 1/256 of a cell
+ *   A      the glyph's advance, in 1/64 of a cell
+ */
+export function flowMapTexture(
+  placements: readonly Placement[],
+  clusters: readonly string[],
+  atlas: GlyphAtlas,
+  cols: number,
+  rows: number,
+  samples: number,
+): Uint8Array {
+  const width = cols * samples;
+  const data = new Uint8Array(width * rows * 4);
+  // 255 in red is "no glyph here", so an untouched texel draws nothing.
+  for (let i = 0; i < width * rows; i++) data[i * 4] = 255;
+
+  for (const p of placements) {
+    if (p.row < 0 || p.row >= rows || p.width <= 0) continue;
+    const cluster = clusters[p.cluster];
+    if (!cluster || cluster.trim() === "") continue;
+    const slot = atlas.indexOf.get(cluster);
+    if (slot === undefined) continue;
+    const advance = Math.min(255, Math.round(p.width * 64));
+    if (advance === 0) continue;
+
+    const from = Math.max(0, Math.floor(p.x * samples));
+    const to = Math.min(width - 1, Math.ceil((p.x + p.width) * samples) - 1);
+    for (let i = from; i <= to; i++) {
+      const offset = Math.max(0, Math.min(65535, Math.round((i / samples - p.x) * 256)));
+      const o = (p.row * width + i) * 4;
+      data[o] = slot;
+      data[o + 1] = (offset >> 8) & 255;
+      data[o + 2] = offset & 255;
+      data[o + 3] = advance;
+    }
   }
   return data;
 }

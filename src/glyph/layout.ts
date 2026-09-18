@@ -219,3 +219,129 @@ export function wordNudge(
   if (x > 0 && wordEnds[cell - 1] === 1) nudge += gap / 2;
   return nudge;
 }
+
+/** One placed cluster in proportional flow. Every unit here is cells. */
+export interface Placement {
+  /** Index into `clusters`. */
+  cluster: number;
+  /** Which tone row. Rows stay uniform — only the horizontal axis varies. */
+  row: number;
+  /** Left edge, in cells, fractional. */
+  x: number;
+  /** Measured advance, in cells. */
+  width: number;
+}
+
+export interface ProportionalLayout {
+  placements: Placement[];
+  /** Every cluster in reading order, flattened from the tokens. */
+  clusters: string[];
+  /** Clusters the grid had no room for. Surfaced, never dropped silently. */
+  truncated: number;
+}
+
+/**
+ * Flow laid out by **measured advance** rather than one cluster per cell.
+ *
+ * The tone lattice underneath is still uniform — error diffusion and ordered
+ * dithering both assume a regular grid, and nothing here touches it. What
+ * changes is only the horizontal placement of glyphs over that grid: rows stay
+ * fixed, and a cluster takes the width it actually needs. Devanagari advances
+ * span 2.4x between the narrowest and widest cluster, so a fixed column either
+ * strands the narrow ones in space or condenses the wide ones to fit.
+ *
+ * `measure` returns a cluster's advance **in cells**. It is a callback rather
+ * than a canvas because this module is pure and runs under Node in the unit
+ * tests; the caller owns the font and does the measuring.
+ *
+ * Whitespace gets its natural width here, which is the point. On the uniform
+ * lattice a space cost a whole cell — far more air than a word break wants —
+ * so it was dropped and the gap faked by nudging the glyphs either side of it.
+ * With real advances the space is simply a space, and that whole mechanism
+ * (`wordEnds`, `wordNudge`, and the clamp that stopped it overlapping) has
+ * nothing left to do.
+ */
+export function layoutProportional(
+  tokens: readonly Token[],
+  w: number,
+  h: number,
+  options: FlowOptions,
+  measure: (cluster: string) => number,
+): ProportionalLayout {
+  const clusters: string[] = [];
+  for (const token of tokens) clusters.push(...token.clusters);
+  const placements: Placement[] = [];
+  if (w <= 0 || h <= 0 || clusters.length === 0) return { placements, clusters, truncated: 0 };
+
+  // Measured once per cluster occurrence. A negative or NaN advance would walk
+  // the cursor backwards and never terminate, so it is floored at zero.
+  const adv = new Float64Array(clusters.length);
+  for (let i = 0; i < clusters.length; i++) {
+    const m = measure(clusters[i]!);
+    adv[i] = Number.isFinite(m) && m > 0 ? m : 0;
+  }
+
+  const offsets: number[] = [];
+  let running = 0;
+  for (const token of tokens) {
+    offsets.push(running);
+    running += token.clusters.length;
+  }
+
+  let row = 0;
+  let x = 0;
+  let placed = 0;
+  const wrap = (): boolean => {
+    row++;
+    x = 0;
+    return row < h;
+  };
+
+  // `repeat` tiles until the rows run out; `stretch` lays the text down once.
+  const passes = options.fit === "repeat" ? Number.MAX_SAFE_INTEGER : 1;
+  let guard = 0;
+  outer: for (let pass = 0; pass < passes; pass++) {
+    // A pass that places nothing would spin forever on a grid too small to
+    // hold even one cluster.
+    const before = placed;
+    for (let t = 0; t < tokens.length; t++) {
+      if (guard++ > 1_000_000) break outer;
+      const token = tokens[t]!;
+      const len = token.clusters.length;
+      if (len === 0) continue;
+      const base = offsets[t]!;
+
+      if (token.clusters.every((c) => c.trim() === "")) {
+        // A space costs its own width now, and never opens a row.
+        if (x > 0) x += adv[base]!;
+        continue;
+      }
+
+      let width = 0;
+      for (let i = 0; i < len; i++) width += adv[base + i]!;
+
+      // Keep the word whole when it would straddle the wrap and could fit on a
+      // row of its own. A word wider than the whole row still has to split, or
+      // nothing fits and the cursor never advances.
+      if (options.keepWords && token.wordLike && x > 0 && x + width > w && width <= w) {
+        if (!wrap()) break outer;
+      }
+
+      for (let i = 0; i < len; i++) {
+        const a = adv[base + i]!;
+        if (x > 0 && x + a > w) {
+          if (!wrap()) break outer;
+        }
+        placements.push({ cluster: base + i, row, x, width: a });
+        x += a;
+        placed++;
+      }
+    }
+    if (options.fit === "stretch") break;
+    if (placed === before) break;
+  }
+
+  const ink = clusters.filter((c) => c.trim() !== "").length;
+  const truncated = options.fit === "stretch" ? Math.max(0, ink - placed) : 0;
+  return { placements, clusters, truncated };
+}

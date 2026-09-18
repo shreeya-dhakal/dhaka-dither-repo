@@ -358,16 +358,27 @@
     const gpuShare = movedShare(gpuTightPx, gpuWidePx);
     // Ink is logged, not asserted: what it must *not* do is collapse, which is
     // what clipping the nudged glyphs looked like.
-    const inkKept = inkShareOf(gpuWidePx) / Math.max(1e-6, inkShareOf(gpuTightPx));
+    // How much ink a wider gap costs each path.
+    //
+    // On the fixed lattice the answer was "none": the gap was a painter's nudge
+    // and the same glyphs were drawn either way, so any loss meant clipping.
+    // With measured advances a wider space genuinely fits fewer glyphs, so ink
+    // *should* fall — what must not differ is how far it falls on each path.
+    //
+    // That comparison is the one this file was missing. The two paths were
+    // checked only against themselves at two settings, so a Canvas path on
+    // proportional layout and a shader still on the lattice would both go on
+    // passing while a still and a video rendered differently.
+    const cpuKept = inkShareOf(cpuWidePx) / Math.max(1e-6, inkShareOf(cpuTightPx));
+    const gpuKept = inkShareOf(gpuWidePx) / Math.max(1e-6, inkShareOf(gpuTightPx));
     lines.push(
       `      word gap — cpu ${(cpuShare * 100).toFixed(1)}% of pixels move,` +
-      ` gpu ${(gpuShare * 100).toFixed(1)}%; gpu ink kept ${(inkKept * 100).toFixed(0)}%`,
+      ` gpu ${(gpuShare * 100).toFixed(1)}%; ink kept cpu ${(cpuKept * 100).toFixed(0)}%` +
+      ` gpu ${(gpuKept * 100).toFixed(0)}%`,
     );
     check("the word gap changes what the CPU path draws", cpuShare > 0.002, true);
     check("and the shader moves with it rather than ignoring it", gpuShare > 0.002, true);
-    // A nudged glyph is moved, never trimmed. Before the shader clamped the
-    // slide to the glyph's own slot this lost 29% of the ink at a wide gap.
-    check("and the shader moves glyphs rather than clipping them", inkKept > 0.95, true);
+    check("and both paths lose the same ink to it", Math.abs(cpuKept - gpuKept) < 0.08, true);
 
     /**
      * The picture has to read *through* the text.

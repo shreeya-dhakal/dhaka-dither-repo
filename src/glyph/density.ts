@@ -32,6 +32,7 @@ const ABSENT_FAMILIES = [
 let scratch: CanvasRenderingContext2D | null = null;
 const cache = new Map<string, number>();
 const supportCache = new Map<string, boolean>();
+const advanceCache = new Map<string, number>();
 
 function context(): CanvasRenderingContext2D {
   if (scratch) return scratch;
@@ -57,6 +58,7 @@ export async function ensureFontsLoaded(fontSpecs: readonly string[]): Promise<v
   // numbers behind, so anything cached before this point is discarded.
   cache.clear();
   supportCache.clear();
+  advanceCache.clear();
 }
 
 /**
@@ -161,4 +163,31 @@ export function measureAll(
     density: measureDensity(cluster, fontFamily),
     supported: isSupported(cluster, fontFamily),
   }));
+}
+
+/**
+ * A cluster's advance, as a fraction of the font size.
+ *
+ * Em-relative rather than pixels so it is scale-invariant: the same number
+ * serves every pixel size, and the caller multiplies by whatever size it draws
+ * at. This is what proportional flow packs rows with.
+ *
+ * Subject to the same gate as density, and for the same reason — measured
+ * before the webfont arrives this returns the fallback's metrics, and the text
+ * would be laid out to a font that is not the one drawn. Hence the shared
+ * cache clear in `ensureFontsLoaded`.
+ *
+ * `measureText().width` is the **advance**, not the ink extent: it includes the
+ * side bearings, which is exactly what setting text needs. `actualBoundingBox*`
+ * is the ink, and using it here would butt the glyphs against each other.
+ */
+export function measureAdvance(cluster: string, fontFamily: string): number {
+  const key = `${fontFamily}\u0000${cluster}`;
+  const hit = advanceCache.get(key);
+  if (hit !== undefined) return hit;
+  const ctx = context();
+  ctx.font = `${SIZE}px ${fontFamily}`;
+  const advance = ctx.measureText(cluster).width / SIZE;
+  advanceCache.set(key, advance);
+  return advance;
 }
