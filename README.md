@@ -72,7 +72,7 @@ A Devanagari conjunct like **क्षि** is one written unit made of several 
 
 This is the whole reason the project exists rather than reaching for an existing library.
 
-## Licence
+## LICENSE
 
 MIT — see [LICENSE](LICENSE).
 
