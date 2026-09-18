@@ -119,6 +119,12 @@ export interface ParamStructure {
   algorithm: AlgorithmId;
   bayerSize: BayerSize;
   serpentine: boolean;
+  /**
+   * Draw flow on the old fixed-width lattice: one cluster per cell, whatever
+   * its advance. Off by default, because measured placement is what the tool
+   * does now — this exists so the two can be shown side by side.
+   */
+  debugFixedWidthCells: boolean;
   outputMode: OutputMode;
   cutLightest: boolean;
   /** Explicit so the GPU and CPU paths can be made to agree for the parity test. */
@@ -281,6 +287,7 @@ const DEFAULT_STRUCTURE: ParamStructure = {
   algorithm: "floyd-steinberg",
   bayerSize: 4,
   serpentine: true,
+  debugFixedWidthCells: false,
   outputMode: "mono",
   cutLightest: false,
   downsample: "area",

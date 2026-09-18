@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { EMPTY, layoutFlow, wordNudge } from "./layout.ts";
+import { EMPTY, layoutFlow, layoutProportional, wordNudge } from "./layout.ts";
 import { segmentWords } from "./segment.ts";
 
 /** The clusters a layout actually places, row by row, for readable assertions. */
@@ -195,4 +195,78 @@ test("no gap means no movement anywhere", () => {
   for (let i = 0; i < cells.length; i++) {
     expect(wordNudge(cells, wordEnds, 5, i, 0)).toBe(0);
   }
+});
+
+/** A stub advance table, in cells, so the packing can be tested under Node. */
+const widths: Record<string, number> = { n: 0.5, w: 1.0, " ": 0.25 };
+const stub = (c: string) => widths[c] ?? 0.5;
+
+test("a cluster takes its measured width, not a whole cell", () => {
+  const laid = layoutProportional(segmentWords("nw"), 8, 2, { keepWords: false, fit: "stretch" }, stub);
+  expect(laid.placements.map((p) => [p.x, p.width])).toEqual([
+    [0, 0.5],
+    [0.5, 1.0],
+  ]);
+});
+
+test("a row holds more narrow clusters than wide ones", () => {
+  // Four cells of room. Eight halves fit; four wholes fit. On a fixed lattice
+  // both would be four, which is the entire reason for this layout.
+  const narrow = layoutProportional(segmentWords("nnnnnnnn"), 4, 1, { keepWords: false, fit: "stretch" }, stub);
+  const wide = layoutProportional(segmentWords("wwww"), 4, 1, { keepWords: false, fit: "stretch" }, stub);
+  expect(narrow.placements.length).toBe(8);
+  expect(wide.placements.length).toBe(4);
+});
+
+test("wrapping happens on measured width, not on a column count", () => {
+  // Three wholes need 3.0 of a 2.5-wide row, so the third drops.
+  const laid = layoutProportional(segmentWords("www"), 2.5, 2, { keepWords: false, fit: "stretch" }, stub);
+  expect(laid.placements.map((p) => p.row)).toEqual([0, 0, 1]);
+});
+
+test("whitespace takes its natural width and never opens a row", () => {
+  const laid = layoutProportional(segmentWords("n n"), 8, 1, { keepWords: false, fit: "stretch" }, stub);
+  // 0.5 for the first, 0.25 for the space, so the second starts at 0.75 —
+  // a fraction of a cell, which a lattice with no half-cells could not do.
+  expect(laid.placements.map((p) => p.x)).toEqual([0, 0.75]);
+  // A row never opens on a space.
+  const leading = layoutProportional(segmentWords(" n"), 8, 1, { keepWords: false, fit: "stretch" }, stub);
+  expect(leading.placements[0]!.x).toBe(0);
+});
+
+test("keeping words whole moves the whole word down, measured", () => {
+  // Row is 3.0 wide. "nn" is 1.0 and fits; "www" is 3.0, which fits a row of
+  // its own but not the 1.75 left after "nn" and its space — so it moves whole.
+  // The row has to be at least as wide as the word, or keep-words correctly
+  // declines to wrap and the word splits instead.
+  const laid = layoutProportional(segmentWords("nn www"), 3, 2, { keepWords: true, fit: "stretch" }, stub);
+  expect(laid.placements.filter((p) => p.row === 0).length).toBe(2);
+  expect(laid.placements.filter((p) => p.row === 1).length).toBe(3);
+});
+
+test("a word wider than the whole row still splits rather than hanging", () => {
+  const laid = layoutProportional(segmentWords("wwww"), 1.5, 4, { keepWords: true, fit: "stretch" }, stub);
+  expect(laid.placements.length).toBe(4);
+  expect(new Set(laid.placements.map((p) => p.row)).size).toBeGreaterThan(1);
+});
+
+test("repeat tiles until the rows run out, stretch lays it down once", () => {
+  const once = layoutProportional(segmentWords("nn"), 4, 3, { keepWords: false, fit: "stretch" }, stub);
+  const tiled = layoutProportional(segmentWords("nn"), 4, 3, { keepWords: false, fit: "repeat" }, stub);
+  expect(once.placements.length).toBe(2);
+  expect(tiled.placements.length).toBeGreaterThan(2);
+  expect(tiled.placements.every((p) => p.row < 3)).toBe(true);
+});
+
+test("stretch reports what the grid had no room for", () => {
+  const laid = layoutProportional(segmentWords("wwww"), 1, 2, { keepWords: false, fit: "stretch" }, stub);
+  expect(laid.placements.length).toBe(2);
+  expect(laid.truncated).toBe(2);
+});
+
+test("a zero or nonsense advance cannot walk the cursor backwards", () => {
+  const laid = layoutProportional(segmentWords("nnn"), 4, 1, { keepWords: false, fit: "stretch" },
+    () => Number.NaN);
+  expect(laid.placements.every((p) => p.x === 0)).toBe(true);
+  expect(laid.placements.length).toBe(3);
 });

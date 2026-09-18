@@ -62,7 +62,7 @@ export class GlSurface {
     // Samplers must be set with uniform1i; routing them through the generic
     // uniform path below would set a float and raise INVALID_OPERATION.
     gl.useProgram(program);
-    ["uSource", "uMask", "uAtlas", "uCells", "uWordEnd"].forEach((name, unit) => {
+    ["uSource", "uMask", "uAtlas", "uCells", "uWordEnd", "uGlyphHalf", "uFlowMap"].forEach((name, unit) => {
       const location = gl.getUniformLocation(program, name);
       if (location) gl.uniform1i(location, unit);
     });
@@ -138,6 +138,31 @@ export class GlSurface {
     const wrap = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return texture;
+  }
+
+  /**
+   * A four-channel data texture. `maskTexture` is R8 and carries one number per
+   * texel; proportional flow needs four — an atlas slot, a 16-bit offset into
+   * the glyph, and the glyph's width — so it needs its own upload.
+   */
+  rgbaTexture(
+    data: Uint8Array,
+    width: number,
+    height: number,
+    existing?: WebGLTexture | null,
+  ): WebGLTexture {
+    const gl = this.gl;
+    const texture = existing ?? gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // NEAREST throughout: every channel here is data, and interpolating a slot
+    // index between two glyphs names a third glyph that belongs to neither.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     return texture;

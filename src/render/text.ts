@@ -15,8 +15,18 @@
 
 import type { Rgb } from "../core/palette.ts";
 import { compositeGlow, emits, glowSigma, layerContext } from "./glow.ts";
-import { wordNudge } from "../glyph/layout.ts";
+import { wordNudge, type Placement } from "../glyph/layout.ts";
 import type { ParamSet } from "../params.ts";
+
+/**
+ * Flow's font size, as a multiple of the cell's smaller side.
+ *
+ * Exported because proportional layout has to pack rows using the advance at
+ * the size the glyph is actually drawn. Two copies of this number would drift,
+ * and the symptom would be text that wraps a cluster early or late for reasons
+ * nothing on screen explains.
+ */
+export const FLOW_FONT_SCALE = 1.05;
 
 function css({ r, g, b }: Rgb): string {
   return `rgb(${r} ${g} ${b})`;
@@ -231,7 +241,7 @@ export function paintFlow(
 
   const cellW = outW / w;
   const cellH = outH / h;
-  const base = Math.min(cellW, cellH) * 1.05;
+  const base = Math.min(cellW, cellH) * FLOW_FONT_SCALE;
   const steps = Math.max(1, levels - 1);
   const gap = params.flowWordGap;
   // Sized off the cell, not off the per-level font size: the halo marks where
@@ -396,4 +406,106 @@ export function gridToText(index: Uint8Array, w: number, h: number, ramp: readon
     rows.push(row.replace(/\s+$/, ""));
   }
   return rows.join("\n");
+}
+
+/**
+ * Flow painted from **measured placements** rather than a fixed lattice.
+ *
+ * Rows stay uniform, because the tone grid underneath them is the dither
+ * lattice and that has to stay regular. Only the horizontal axis changes: each
+ * cluster is drawn at the position the layout measured for it, at its own
+ * advance.
+ *
+ * Three things the fixed-width path needed disappear here, and their absence is
+ * the point rather than an oversight:
+ *
+ * - **No width cap.** `cellCaps` existed to condense a cluster wider than its
+ *   cell. Nothing is wider than its own advance.
+ * - **No word nudge.** Whitespace has a real width now, so a word break is a
+ *   space rather than two glyphs leaning away from each other.
+ * - **No clamp.** The nudge is what could push ink into a neighbour; with no
+ *   nudge there is nothing to bound.
+ *
+ * Tone still comes from the cell under the glyph's centre, so the picture reads
+ * through the text exactly as before, and the glow still goes to its own layer.
+ */
+export function paintFlowProportional(
+  placements: readonly Placement[],
+  clusters: readonly string[],
+  pixels: Uint8ClampedArray,
+  mod: Uint8Array,
+  levels: number,
+  w: number,
+  h: number,
+  fontFamily: string,
+  params: ParamSet,
+  target: HTMLCanvasElement,
+  outW: number,
+  outH: number,
+  paper: Rgb | null,
+  ink: Rgb,
+): void {
+  const ctx = prepare(target, outW, outH, paper);
+
+  const cellW = outW / w;
+  const cellH = outH / h;
+  const base = Math.min(cellW, cellH) * FLOW_FONT_SCALE;
+  const steps = Math.max(1, levels - 1);
+
+  // With a glow the glyphs go to a transparent layer and are composited after,
+  // exactly as the fixed-width painter does it.
+  const blur = glowSigma(params.glow, cellW, cellH);
+  const g = blur > 0 ? layerContext(outW, outH) : ctx;
+
+  const fonts: string[] = [];
+  const alphas: number[] = [];
+  for (let level = 0; level < levels; level++) {
+    const darkness = 1 - level / steps;
+    const weight = Math.round(400 + params.flowWeight * darkness * 300);
+    const size = base * (1 - params.flowSize * (1 - MIN_SIZE) * (1 - darkness));
+    fonts.push(`${weight} ${size}px ${fontFamily}`);
+    alphas.push(1 - params.flowOpacity * (1 - darkness));
+  }
+
+  let currentFont = "";
+  let currentFill = "";
+  for (const p of placements) {
+    const cluster = clusters[p.cluster];
+    if (!cluster || cluster.trim() === "") continue;
+    if (p.row < 0 || p.row >= h) continue;
+
+    // The glyph's tone is the cell under its centre. A glyph no longer sits in
+    // one cell, so "its" cell is the one it is mostly over.
+    const centre = p.x + p.width / 2;
+    const gx = Math.min(w - 1, Math.max(0, Math.floor(centre)));
+    const cell = p.row * w + gx;
+
+    const q = cell * 4;
+    if (pixels[q + 3] === 0) continue;
+
+    const level = Math.min(mod[cell]!, levels - 1);
+    const alpha = alphas[level]!;
+    if (alpha <= 0.01) continue;
+
+    const font = fonts[level]!;
+    if (font !== currentFont) {
+      g.font = font;
+      currentFont = font;
+    }
+    const shown = offPaper(
+      { r: pixels[q]!, g: pixels[q + 1]!, b: pixels[q + 2]! },
+      paper,
+      ink,
+    );
+    const fill = `rgb(${Math.round(shown.r)} ${Math.round(shown.g)} ${Math.round(shown.b)})`;
+    if (fill !== currentFill) {
+      g.fillStyle = fill;
+      currentFill = fill;
+    }
+    g.globalAlpha = alpha;
+    g.fillText(cluster, centre * cellW, (p.row + BASELINE) * cellH);
+  }
+  g.globalAlpha = 1;
+
+  if (blur > 0) compositeGlow(ctx, blur, emits(ink, paper));
 }

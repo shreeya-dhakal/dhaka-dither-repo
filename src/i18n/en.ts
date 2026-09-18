@@ -24,9 +24,12 @@ export const en = {
   "group.motion": "Animation",
   "group.hover": "Pointer",
   "group.video": "Video",
+  "group.camera": "Camera",
+  "group.animated": "Animated export",
   "group.export": "Export",
 
   "image.open": "Open image or video…",
+  "camera.use": "Use the camera…",
   "image.failed": "That file could not be opened: {reason}",
   "stage.empty": "Drop an image here, or open one from the rail.",
 
@@ -146,6 +149,59 @@ export const en = {
   "video.unstable": "Error diffusion is not stable frame to frame — one pixel of movement rewrites the whole pattern, so the picture boils. That is sometimes what you want. Smoothing takes the edge off it; blue noise avoids it entirely.",
   "video.short": "Only {n} of {total} frames were encoded — the file is shorter than the source. Please report this with the video's codec.",
   "video.done": "Export finished.",
+
+  "camera.consent":
+    "This turns on the camera attached to this machine and dithers what it sees. The picture is processed in this tab and goes nowhere else — there is no server to send it to. Nothing is recorded until you press Record, and nothing is saved anywhere until you export a file.",
+  "camera.allow": "Turn the camera on",
+  "camera.blocked":
+    "This browser has the camera blocked for this page, so the button below will not raise a prompt. Allow it in the site settings — usually the icon at the left of the address bar — then try again.",
+  "camera.device": "Camera",
+  "camera.mirror": "Mirror the picture",
+  "camera.record": "Record",
+  "camera.stop": "Stop and save",
+  "camera.off": "Turn the camera off",
+  "camera.noAudio":
+    "Recording captures the picture only. The microphone is never requested, so a take has no sound.",
+  "camera.opening": "Asking for permission…",
+  "camera.live": "{label} — {w}×{h} at {fps} fps",
+  "camera.unnamed": "Camera {n}",
+  "camera.failed": "The camera could not be opened: {reason}",
+  "camera.unsupported": "This browser does not offer a camera to a web page.",
+  "camera.insecure":
+    "A camera is only offered over https or on localhost. This page was opened another way, so the browser will not hand one over.",
+  "camera.originHint": "Also worth knowing: {hint}.",
+  "camera.noFrames":
+    "The camera opened but has sent no picture. The track says \"{state}\" and the player is at readyState {ready}. On macOS this is usually the system camera permission rather than the browser's: check System Settings → Privacy & Security → Camera. Closing any other app using the camera also fixes it.",
+  "camera.ended": "The camera stopped — it was unplugged, or another app took it.",
+  "camera.recording": "Recording — {n} frames, {seconds} s",
+  "camera.recorded": "Saved {n} frames, {seconds} s.",
+  "camera.recordFailed": "The recording failed: {reason}",
+  "camera.recordLimit":
+    "Recording stopped at the size ceiling, and what had been captured is in the file.",
+
+  "export.format": "Animated format",
+  "format.video": "Video (MP4 or WebM)",
+  "format.gif": "GIF",
+  "export.gifFps": "GIF frame rate",
+  "export.gifRate": "{n} fps",
+  "export.gifNote":
+    "A GIF holds at most 256 colours per frame and stores its delays in hundredths of a second, so only some frame rates are real ones. Dithered output is already down to a few colours, so it usually survives a GIF exactly — a colour halftone does not, and is approximated.",
+  "export.gifApproximated":
+    "Some frames needed more than 256 colours, so their colours were approximated. Export as video to avoid that.",
+  "export.animation": "Export the animation",
+  "export.animationCancel": "Stop exporting",
+  "export.animationProgress": "Frame {n} of {total}",
+  "export.animationDone": "Saved {n} frames, {seconds} s.",
+  "export.animationFailed": "The animation export failed: {reason}",
+  "export.animationStopped": "Stopped early, and what had been rendered is in the file.",
+  "export.animationLoops": "One full loop is {seconds} s, so that is what exports.",
+  "export.animationRepeats":
+    "This animation repeats every {period} s, so {seconds} s exports — {n} whole loops, and the end meets the beginning.",
+  "export.animationNoLoop":
+    "This animation never repeats, so there is no natural loop to cut on — {seconds} s exports, and the end will not meet the beginning.",
+  "export.pngIsOneInstant":
+    "An animation is running, and a PNG is one instant of it. Export the animation below for the movement.",
+  "export.gifRealFps": "The GIF plays at {n} fps — the nearest rate its delays can hold.",
   "textmode.braille": "Braille",
   "braille.dotRadius": "Dot size",
   "braille.dotSpacing": "Dot spacing",

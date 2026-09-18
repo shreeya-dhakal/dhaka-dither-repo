@@ -214,3 +214,42 @@ export function motionField(id: MotionId, speed = 1, aspect = 1): MotionField {
     }
   }
 }
+
+/**
+ * How long one loop of a field takes, in seconds, or `null` where it never
+ * repeats.
+ *
+ * An animated export has to choose a duration, and choosing it badly is
+ * visible: a clip cut at 3 seconds out of a 4-second breath jumps at the loop
+ * point, which reads as a broken export rather than as a rounding decision.
+ * Every field here is a closed form in `t`, so its period is not measured or
+ * guessed — it is read off the same constant the field itself multiplies time
+ * by, which is why this lives beside them and not in the exporter.
+ *
+ * Two of them genuinely do not repeat. Rain runs 48 columns at hashed rates
+ * whose common multiple is not a number anybody wants to sit through, and
+ * Sparkle re-hashes on every step, so its next second never resembles its last.
+ * `null` is the truthful answer for those, and the caller says so rather than
+ * exporting a loop that visibly is not one.
+ */
+export function motionPeriod(id: MotionId, speed = 1): number | null {
+  if (speed <= 0 || !Number.isFinite(speed)) return null;
+  switch (id) {
+    case "none":
+      return null;
+    case "breathe":
+      return 4 / speed;
+    case "pulse":
+      return 1 / speed;
+    case "wave":
+    case "spiral":
+      return 2 / speed;
+    case "ripple":
+      return 1 / speed;
+    case "cellular":
+      return 5 / speed;
+    case "rain":
+    case "sparkle":
+      return null;
+  }
+}

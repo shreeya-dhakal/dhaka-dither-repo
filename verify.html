@@ -358,16 +358,27 @@
     const gpuShare = movedShare(gpuTightPx, gpuWidePx);
     // Ink is logged, not asserted: what it must *not* do is collapse, which is
     // what clipping the nudged glyphs looked like.
-    const inkKept = inkShareOf(gpuWidePx) / Math.max(1e-6, inkShareOf(gpuTightPx));
+    // How much ink a wider gap costs each path.
+    //
+    // On the fixed lattice the answer was "none": the gap was a painter's nudge
+    // and the same glyphs were drawn either way, so any loss meant clipping.
+    // With measured advances a wider space genuinely fits fewer glyphs, so ink
+    // *should* fall — what must not differ is how far it falls on each path.
+    //
+    // That comparison is the one this file was missing. The two paths were
+    // checked only against themselves at two settings, so a Canvas path on
+    // proportional layout and a shader still on the lattice would both go on
+    // passing while a still and a video rendered differently.
+    const cpuKept = inkShareOf(cpuWidePx) / Math.max(1e-6, inkShareOf(cpuTightPx));
+    const gpuKept = inkShareOf(gpuWidePx) / Math.max(1e-6, inkShareOf(gpuTightPx));
     lines.push(
       `      word gap — cpu ${(cpuShare * 100).toFixed(1)}% of pixels move,` +
-      ` gpu ${(gpuShare * 100).toFixed(1)}%; gpu ink kept ${(inkKept * 100).toFixed(0)}%`,
+      ` gpu ${(gpuShare * 100).toFixed(1)}%; ink kept cpu ${(cpuKept * 100).toFixed(0)}%` +
+      ` gpu ${(gpuKept * 100).toFixed(0)}%`,
     );
     check("the word gap changes what the CPU path draws", cpuShare > 0.002, true);
     check("and the shader moves with it rather than ignoring it", gpuShare > 0.002, true);
-    // A nudged glyph is moved, never trimmed. Before the shader clamped the
-    // slide to the glyph's own slot this lost 29% of the ink at a wide gap.
-    check("and the shader moves glyphs rather than clipping them", inkKept > 0.95, true);
+    check("and both paths lose the same ink to it", Math.abs(cpuKept - gpuKept) < 0.08, true);
 
     /**
      * The picture has to read *through* the text.
@@ -1948,6 +1959,254 @@
     check("and one click resumes rather than two",
       label() !== idleLabel && Number(scrubBar.value) > 200, true);
     pframe.remove();
+
+    /* --------------------------------------------------------------------- *
+     * The live camera, and the exports that produce moving pictures.
+     *
+     * `getUserMedia` is replaced with a canvas `captureStream`, not driven with
+     * Chromium's fake-device flags. The stub is the better instrument here:
+     * it works in any browser this harness is ever pointed at, it makes the
+     * frames deterministic instead of whatever the fake device feels like
+     * producing, and — the reason it exists — it can *count the calls*, which
+     * is the only way to check the property that actually matters. That
+     * property is not "the camera opens". It is that **choosing** the camera
+     * opens nothing at all.
+     * --------------------------------------------------------------------- */
+    /**
+     * Plays a finished export back through the browser's own decoders.
+     *
+     * A byte count cannot tell a working file from a broken one — the first
+     * version of this checked `size > 5000` and failed on a perfectly good
+     * 160×120 two-colour take, because H.264 compresses a flat dither to almost
+     * nothing. What actually needs proving is that the thing opens, has the
+     * dimensions it claims, and holds more than one instant. So it is opened.
+     */
+    async function playable(blob) {
+      const url = URL.createObjectURL(blob);
+      try {
+        if (blob.type === "image/gif") {
+          const img = new Image();
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = () => reject(new Error("the GIF did not decode"));
+            img.src = url;
+          });
+          return { w: img.naturalWidth, h: img.naturalHeight, seconds: null };
+        }
+        const el = document.createElement("video");
+        el.muted = true;
+        await new Promise((resolve, reject) => {
+          el.onloadedmetadata = resolve;
+          el.onerror = () => reject(new Error(el.error?.message ?? "the video did not open"));
+          el.src = url;
+        });
+        return { w: el.videoWidth, h: el.videoHeight, seconds: el.duration };
+      } catch (error) {
+        return { error: String(error) };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    stage("the live camera");
+    {
+      const cframe = await openFrame("/", "width:900px;height:700px");
+      const cwin = cframe.contentWindow;
+      const cdoc = cframe.contentDocument;
+
+      // A moving synthetic camera. It has to move: a still stream would let a
+      // recorder that captured one frame and repeated it pass.
+      const feed = cdoc.createElement("canvas");
+      feed.width = 160;
+      feed.height = 120;
+      const fctx = feed.getContext("2d");
+      let tick = 0;
+      const paintFeed = () => {
+        fctx.fillStyle = "#000";
+        fctx.fillRect(0, 0, 160, 120);
+        fctx.fillStyle = "#fff";
+        fctx.fillRect((tick * 7) % 130, 40, 30, 30);
+        tick++;
+      };
+      paintFeed();
+      const feedTimer = cwin.setInterval(paintFeed, 40);
+      const synthetic = feed.captureStream(25);
+
+      let asked = 0;
+      cwin.navigator.mediaDevices.getUserMedia = async () => {
+        asked++;
+        return synthetic;
+      };
+
+      // Whatever the app hands to the browser as a download, caught rather than
+      // written to disk. `download()` is the only thing in the app that clicks
+      // an anchor, so stubbing the click is safe and stops the harness pulling
+      // files into the machine's downloads folder on every run.
+      const saved = [];
+      cwin.HTMLAnchorElement.prototype.click = function () {};
+      const realCreate = cwin.URL.createObjectURL.bind(cwin.URL);
+      cwin.URL.createObjectURL = (object) => {
+        if (object instanceof cwin.Blob) saved.push(object);
+        return realCreate(object);
+      };
+
+      // --- step one: choosing must not open ---
+      cdoc.getElementById("useCamera").click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      check("choosing the camera does not open it", asked, 0);
+      check("it shows the consent notice instead",
+        cdoc.querySelector('[data-when="cameraAsk"]').hidden, false);
+      check("and the live controls stay hidden until it is open",
+        cdoc.getElementById("record").closest("label").hidden, true);
+
+      // --- step two: the button that says it will ask, asks ---
+      cdoc.getElementById("cameraAllow").click();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      check("the allow button is what opens it", asked, 1);
+      check("and the live controls arrive with it",
+        cdoc.getElementById("record").closest("label").hidden, false);
+
+      const cout = cdoc.getElementById("out");
+      lines.push(`      camera preview is ${cout.width}×${cout.height}`);
+      check("the camera previews at the stream's own size",
+        [cout.width, cout.height, cout.hidden], [160, 120, false]);
+
+      // The picture must be the dithered stream, not a blank canvas: a source
+      // that failed to attach also produces a canvas of the right size.
+      const sample = () => {
+        const c = cdoc.createElement("canvas");
+        c.width = cout.width;
+        c.height = cout.height;
+        const x = c.getContext("2d", { willReadFrequently: true });
+        x.drawImage(cout, 0, 0);
+        const d = x.getImageData(0, 0, c.width, c.height).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) sum += d[i];
+        return sum / (d.length / 4);
+      };
+      const first = sample();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const second = sample();
+      lines.push(`      preview mean ${first.toFixed(1)} then ${second.toFixed(1)}`);
+      check("the preview carries the stream rather than a blank frame",
+        first > 0 && first < 255, true);
+      check("and it follows the stream as it moves", first !== second, true);
+
+      // --- step three: a take produces a real file ---
+      cdoc.getElementById("record").click();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      check("recording is under way",
+        cdoc.getElementById("stopRecord").closest("label").hidden, false);
+      cdoc.getElementById("stopRecord").click();
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+
+      const take = saved[saved.length - 1];
+      lines.push(`      take: ${take ? `${take.type}, ${take.size} bytes` : "nothing saved"}`);
+      check("stopping saves a video file", take?.type, "video/mp4");
+      // A muxer that rejected every frame still hands back a blob, and it still
+      // downloads without complaint. Only opening it can tell the difference.
+      const played = take ? await playable(take) : { error: "nothing saved" };
+      lines.push(`      the take opens as ${JSON.stringify(played)}`);
+      check("and the take opens at the size it was recorded at",
+        [played.w, played.h], [160, 120]);
+      check("and holds more than a single instant", played.seconds > 0.5, true);
+
+      // --- step four: turning it off releases the hardware ---
+      cdoc.getElementById("cameraOff").click();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      check("turning the camera off stops every track",
+        synthetic.getTracks().every((t) => t.readyState === "ended"), true);
+
+      cwin.clearInterval(feedTimer);
+      cframe.remove();
+    }
+
+    /**
+     * An animation must export as something that moves.
+     *
+     * A still under an animated field used to have only the PNG button, which
+     * captures one instant of it — so the movement, which is the whole reason
+     * the field exists, could not leave the tab. Both containers are checked
+     * because they are two entirely separate writers.
+     */
+    stage("animated export");
+    {
+      const aframe = await openFrame("/", "width:900px;height:700px");
+      const awin = aframe.contentWindow;
+      const adoc = aframe.contentDocument;
+
+      const saved = [];
+      awin.HTMLAnchorElement.prototype.click = function () {};
+      const realCreate = awin.URL.createObjectURL.bind(awin.URL);
+      awin.URL.createObjectURL = (object) => {
+        if (object instanceof awin.Blob) saved.push(object);
+        return realCreate(object);
+      };
+
+      // A real picture through the real input, so nothing about the load path
+      // is special-cased for the harness.
+      const src = adoc.createElement("canvas");
+      src.width = 96;
+      src.height = 72;
+      const sctx = src.getContext("2d");
+      const grad = sctx.createLinearGradient(0, 0, 96, 72);
+      grad.addColorStop(0, "#000");
+      grad.addColorStop(1, "#fff");
+      sctx.fillStyle = grad;
+      sctx.fillRect(0, 0, 96, 72);
+      const png = await new Promise((resolve) => src.toBlob(resolve, "image/png"));
+      const transfer = new DataTransfer();
+      transfer.items.add(new awin.File([png], "t.png", { type: "image/png" }));
+      const input = adoc.getElementById("file");
+      input.files = transfer.files;
+      input.dispatchEvent(new awin.Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 900));
+
+      check("the animated group is hidden while nothing is animating",
+        adoc.getElementById("animFormat").closest("details").hidden, true);
+
+      const motion = adoc.getElementById("motion");
+      motion.value = "breathe";
+      motion.dispatchEvent(new awin.Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      check("and it appears as soon as a field is chosen",
+        adoc.getElementById("animFormat").closest("details").hidden, false);
+      // Breathe's period is 4/speed, and the plan is read off that rather than
+      // guessed — so this is also the check that the constant reaches the UI.
+      lines.push(`      plan: ${adoc.getElementById("animationPlan").textContent}`);
+
+      for (const [format, type] of [["gif", "image/gif"], ["video", "video/mp4"]]) {
+        const before = saved.length;
+        const pick = adoc.getElementById("animFormat");
+        pick.value = format;
+        pick.dispatchEvent(new awin.Event("change", { bubbles: true }));
+        // A slow GIF rate: the point is that it writes a real file, and 50 fps
+        // of a four-second loop is two hundred renders for no extra coverage.
+        const rate = adoc.getElementById("gifFps");
+        rate.value = "10";
+        rate.dispatchEvent(new awin.Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        adoc.getElementById("exportAnimation").click();
+        for (let i = 0; i < 200 && saved.length === before; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const file = saved[saved.length - 1];
+        lines.push(`      ${format}: ${file ? `${file.type}, ${file.size} bytes` : "nothing saved"} — ${adoc.getElementById("animationStatus").textContent}`);
+        check(`an animation exports as ${format}`, file?.type, type);
+        const opened = file ? await playable(file) : { error: "nothing saved" };
+        check(`and the ${format} opens at the picture's own size`,
+          [opened.w, opened.h], [96, 72]);
+        // A GIF's length lives in its per-frame delays, which a decoded `Image`
+        // does not expose — the frame count in the status line is the reachable
+        // evidence there, and it is printed above.
+        if (type !== "image/gif") {
+          check("and the video holds the whole loop", opened.seconds > 3.5, true);
+        }
+      }
+
+      aframe.remove();
+    }
 
     const report = document.getElementById("report");
     report.textContent = `${failed === 0 ? "all checks passed" : `${failed} FAILED`}\n\n${lines.filter((l) => !l.startsWith("....")).join("\n")}`;
