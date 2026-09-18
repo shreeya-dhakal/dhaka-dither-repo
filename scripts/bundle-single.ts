@@ -9,8 +9,8 @@
  * there with no labels on it.
  *
  * So this inlines everything the page would otherwise fetch — the bundle, the
- * four faces, the blue-noise mask — leaving a document with no subresources at
- * all. Nothing to block.
+ * four faces, the blue-noise mask, the sample picture — leaving a document with
+ * no subresources at all. Nothing to block.
  *
  * It fits the project rather than fighting it: the fonts and masks are already
  * committed so the app works with the network off, and this is the same promise
@@ -62,6 +62,13 @@ const mask = readFileSync("public/masks/bluenoise64.bin").toString("base64");
 html = html.replace(
   "</body>",
   `<script type="application/octet-stream" id="blue-noise">${mask}</script>\n</body>`,
+);
+
+// 4. The sample picture the app opens on, embedded the same way.
+const sample = readFileSync("public/samples/default.jpg").toString("base64");
+html = html.replace(
+  "</body>",
+  `<script type="application/octet-stream" id="sample-image">${sample}</script>\n</body>`,
 );
 
 writeFileSync(OUT, html);

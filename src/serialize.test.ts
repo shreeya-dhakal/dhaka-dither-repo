@@ -52,7 +52,11 @@ test("every parameter survives a round trip, whatever gets added later", () => {
   const back = decodeParams(encodeParams(params).toString());
   for (const key of Object.keys(params) as (keyof ParamSet)[]) {
     if (params[key] === DEFAULT_PARAMS[key]) continue;
-    expect(back[key], `${key} did not survive`).toEqual(params[key]);
+    // Close, not equal: bumping a fractional default by one leaves float error
+    // (0.89 + 1 is 1.8900000000000001) that the URL rightly does not carry.
+    const value = params[key];
+    if (typeof value === "number") expect(back[key], `${key} did not survive`).toBeCloseTo(value, 9);
+    else expect(back[key], `${key} did not survive`).toEqual(value);
   }
 });
 

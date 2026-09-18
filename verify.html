@@ -50,10 +50,30 @@
   <script type="module">
     import { ensureFontsLoaded, isSupported, measureDensity } from "/src/glyph/density.ts";
     import { segment } from "/src/glyph/segment.ts";
-    import { StaticParams } from "/src/params.ts";
+    import { DEFAULT_PARAMS, StaticParams as AppParams } from "/src/params.ts";
     import { FONT_STACK, StillPipeline } from "/src/render/image.ts";
     import { GpuPipeline, textArtFor } from "/src/render/gpu.ts";
     import { StaticText } from "/src/text.ts";
+
+    // The app opens on a styled look — flow text, colour, glow, a tone curve —
+    // but most checks here are about the dither itself and were written against
+    // a neutral baseline. They start from that explicitly; the ones that need
+    // text, colour or glow switch it on themselves.
+    const BASELINE = {
+      text: "off",
+      outputMode: "mono",
+      pixelSize: 4,
+      brightness: 0,
+      contrast: 0,
+      gamma: 1,
+      glow: 0,
+      flowKeepWords: true,
+    };
+    class StaticParams extends AppParams {
+      constructor() {
+        super({ ...DEFAULT_PARAMS, ...BASELINE });
+      }
+    }
 
     const lines = [];
     let failed = 0;

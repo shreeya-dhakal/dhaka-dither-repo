@@ -80,6 +80,8 @@ let gpu: GpuPipeline | null = null;
 /** Kept so an export can build its own pipelines rather than borrow the preview's. */
 let blueNoise: Uint8Array | null = null;
 let bitmap: ImageBitmap | null = null;
+/** Set once the user opens a file, so the sample picture never replaces theirs. */
+let userOpened = false;
 /** Set when the loaded file is a video; the still preview is its first frame. */
 let video: { file: File; source: SourceVideo; scrubbable: boolean } | null = null;
 let exporting: AbortController | null = null;
@@ -792,8 +794,19 @@ function applyDefaultText(): void {
   // and the tool dithers Devanagari and Ranjana. Letting it follow the English
   // interface would have booted the app as a Latin mono ASCII-art toy with its
   // subject switched off.
+  // The varnamala rather than a word: the full alphabet shows off every shape
+  // the face has, and a flow of it reads as Devanagari at a glance. Filtered
+  // exactly as the varnamala button does, so nothing boots as tofu.
+  // A space splits the vowels from the consonants, so the flow is two words
+  // rather than one 53-letter run with nowhere to break.
   const font: TextFont = "devanagari";
-  setText(t("text.defaultContent"));
+  const pool = varnamala().filter((cluster) => isSupported(cluster, FONT_STACK[font]));
+  const firstConsonant = pool.findIndex((cluster) => cluster.codePointAt(0)! >= 0x0915);
+  setText(
+    firstConsonant > 0
+      ? `${pool.slice(0, firstConsonant).join("")} ${pool.slice(firstConsonant).join("")}`
+      : pool.join(""),
+  );
   need<HTMLSelectElement>("textFont").value = font;
   commit({ textFont: font });
   applyAspectDefault();
@@ -942,6 +955,7 @@ async function firstFrame(file: File): Promise<ImageBitmap> {
  * the reason on screen, and this one most of all.
  */
 async function openFile(file: File): Promise<void> {
+  userOpened = true;
   try {
     await load(file);
   } catch (error) {
@@ -2090,3 +2104,33 @@ if (INITIAL_HASH.length > 1) {
 }
 showEffectiveSteps();
 draw();
+
+/**
+ * The sample picture, so the page opens on a result instead of an empty pane.
+ *
+ * Embedded in the single-file build for the same reason the mask is: `fetch`
+ * is blocked under `file://`. A failure leaves the empty-state message up,
+ * which is still a working page.
+ *
+ * Decoded here rather than through `load`, so it can yield at the last moment:
+ * a file opened while this was fetching is the one the user wanted, and `load`
+ * would have closed it and cleared the video.
+ */
+async function loadSample(): Promise<void> {
+  const inline = document.getElementById("sample-image")?.textContent?.trim();
+  const blob = inline
+    ? new Blob([Uint8Array.from(atob(inline), (character) => character.charCodeAt(0))], { type: "image/jpeg" })
+    : await (await fetch(new URL("samples/default.jpg", document.baseURI))).blob();
+  const sample = await createImageBitmap(blob);
+  if (userOpened || bitmap) {
+    sample.close();
+    return;
+  }
+  bitmap = sample;
+  empty.hidden = true;
+  canvas.hidden = false;
+  frame.hidden = false;
+  syncControls();
+  draw();
+}
+if (!bitmap) void loadSample().catch(() => undefined);

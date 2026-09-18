@@ -199,13 +199,13 @@ export interface ParamRange {
  * call sites.
  */
 export const PARAM_RANGES: { readonly [K in keyof ParamValues]: ParamRange } = {
-  pixelSize: { min: 1, max: 64, step: 1, kind: "stepped", default: 4 },
+  pixelSize: { min: 1, max: 64, step: 1, kind: "stepped", default: 5 },
   levels: { min: 2, max: 8, step: 1, kind: "stepped", default: 2 },
   thresholdBias: { min: -0.5, max: 0.5, step: 0.01, kind: "continuous", default: 0 },
   patternStrength: { min: 0, max: 2, step: 0.01, kind: "continuous", default: 1 },
-  brightness: { min: -255, max: 255, step: 1, kind: "continuous", default: 0 },
-  contrast: { min: -1, max: 1, step: 0.01, kind: "continuous", default: 0 },
-  gamma: { min: 0.1, max: 4, step: 0.01, kind: "continuous", default: 1 },
+  brightness: { min: -255, max: 255, step: 1, kind: "continuous", default: 16 },
+  contrast: { min: -1, max: 1, step: 0.01, kind: "continuous", default: 0.89 },
+  gamma: { min: 0.1, max: 4, step: 0.01, kind: "continuous", default: 0.78 },
   invert: { min: 0, max: 1, step: 1, kind: "boolean", default: 0 },
   glyphSteps: { min: 2, max: 20, step: 1, kind: "stepped", default: 8 },
   // Size and opacity start engaged, not at zero.
@@ -233,7 +233,7 @@ export const PARAM_RANGES: { readonly [K in keyof ParamValues]: ParamRange } = {
   temporalSmoothing: { min: 0, max: 0.95, step: 0.01, kind: "continuous", default: 0 },
   paletteIndex: { min: 0, max: 15, step: 1, kind: "stepped", default: 0 },
   cellAspect: { min: 1, max: 3, step: 0.05, kind: "continuous", default: 1.35 },
-  glow: { min: 0, max: 2, step: 0.05, kind: "continuous", default: 0 },
+  glow: { min: 0, max: 2, step: 0.05, kind: "continuous", default: 1.55 },
   dotRadius: { min: 0.1, max: 1.5, step: 0.05, kind: "continuous", default: 0.85 },
   dotSpacing: { min: 0.4, max: 1.4, step: 0.05, kind: "continuous", default: 1 },
 };
@@ -288,16 +288,20 @@ const DEFAULT_STRUCTURE: ParamStructure = {
   bayerSize: 4,
   serpentine: true,
   debugFixedWidthCells: false,
-  outputMode: "mono",
+  outputMode: "color",
   cutLightest: false,
   downsample: "area",
   halftoneShape: "circle",
   halftoneInk: { r: 0, g: 0, b: 0 },
   halftonePaper: { r: 255, g: 255, b: 255 },
   textFont: "devanagari",
-  text: "off",
+  // Flow, so the app opens on what it is for: the sample picture set in
+  // Devanagari. Off would boot it as a plain dither with its subject hidden.
+  text: "flow",
   brailleBharati: false,
-  flowKeepWords: true,
+  // Off: kept whole, a word that misses the end of a row takes the rest of the
+  // row with it, and repeated text strands the same gap on every row.
+  flowKeepWords: false,
   flowFit: "repeat",
   duoDark: { r: 0, g: 0, b: 0 },
   duoLight: { r: 255, g: 255, b: 255 },

@@ -216,7 +216,6 @@ export const en = {
   "note.rampColor": "In density mode the glyph carries the tone and colour carries only hue, so a greyscale image looks the same as mono.",
   "text.copy": "Copy as text",
   "text.copyWarning": "Only aligns in a proportional-safe context for Latin; for Devanagari the PNG is the real artifact.",
-  "text.defaultContent": "धाका",
 
   "tone.brightness": "Brightness",
   "tone.contrast": "Contrast",
